@@ -26,7 +26,7 @@ from utils.fasta_utils import process_fastas, download_fasta_utilities, check_fa
 from boltz_data_pipeline.feature.featurizer import BoltzFeaturizer
 from boltz_data_pipeline.tokenize.boltz_protein import BoltzTokenizer
 
-try: 
+try:
     import mlx.core as mx
     from mlx.utils import tree_unflatten, tree_flatten
     from model.mlx.sampler import EMSampler as EMSamplerMLX
@@ -206,8 +206,8 @@ def initialize_others(args, device):
     featurizer = BoltzFeaturizer()
     processor = ProteinDataProcessor(
         device=device,
-        scale=16.0, 
-        ref_scale=5.0, 
+        scale=16.0,
+        ref_scale=5.0,
         multiplicity=1,
         inference_multiplicity=args.nsample_per_protein,
         backend=args.backend,
@@ -301,6 +301,7 @@ def predict_structures_from_fastas(args):
     # initialize other components
     tokenizer, featurizer, processor, flow, sampler = initialize_others(args, device)
 
+    # just as in InferenceWrapper.process_input(self, aa_seq)
     # process fasta files to input format
     download_fasta_utilities(cache)
     data = check_fasta_inputs(Path(args.fasta_path))

@@ -2,3 +2,21 @@
 *.DS_Store
 *.egg-info
 artifacts/
+data/
+A2a_via_cli/
+*.yaml
+*.log
+*.json
+*.png
+*.cif
+a2a.fasta
+backmapping_5034cf6e-ae81-4caa-ba8d-6950e1d07cd3.npz
+ccd.rdb
+dev.ipynb
+plan.txt
+repo_map.md
+symmetry.pkl
+Wang et al. - 2025 - SimpleFold Folding Proteins is Simpler than You Think.pdf
+training_data/structures/inapo.npz
+training_data/tokens/inapo.pkl
+training_data_backup/target_inapo/structures/inapo.npz

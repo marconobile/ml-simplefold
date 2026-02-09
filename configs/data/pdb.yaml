@@ -2,10 +2,16 @@ _target_: datasets.train_datamodule.SimpleFoldTrainingDataModule
 
 datasets:
   - _target_: datasets.train_datamodule.DatasetConfig
-    data_name: rcsb_protein
-    tokenized_dir: /mnt/task_runtime/data/rcsb_protein_tokenized
-    target_dir: /mnt/task_runtime/data/rcsb_processed_targets
-    manifest_path: /mnt/task_runtime/data/rcsb_protein_tokenized/manifest.json
+    # For a locally processed dataset, follow the structure expected by
+    # `src/simplefold/datasets/train_datamodule.py`:
+    #   <tokenized_dir>/{tokens,records,manifest.json}
+    #   <target_dir>/structures/{record_id}.npz
+    # The sample `training_data/` folder in this repo contains both, so we
+    # can point both dirs at the same root.
+    data_name: local_pdb
+    tokenized_dir: ${paths.work_dir}/training_data
+    target_dir: ${paths.work_dir}/training_data
+    manifest_path: ${paths.work_dir}/training_data/manifest.json
     cropper:
       _target_: boltz_data_pipeline.crop.boltz.BoltzCropper
       min_neighborhood: 0
@@ -13,9 +19,8 @@ datasets:
     filters:
       - _target_: boltz_data_pipeline.filter.dynamic.resolution.ResolutionFilter
         resolution: 5.0
-      - _target_: boltz_data_pipeline.filter.dynamic.date.DateFilter
-        date: "2020-05-01"
-        ref: released
+      # NOTE: Records produced from `process_pdb.py` often don't have deposited/
+      # released/revised dates, so a DateFilter would reject all samples.
 
 filters:
     - _target_: boltz_data_pipeline.filter.dynamic.size.SizeFilter
@@ -28,7 +33,11 @@ tokenizer:
 featurizer:
   _target_: boltz_data_pipeline.feature.featurizer.BoltzFeaturizer
 
-symmetries: /mnt/task_runtime/data/symmetry.pkl
+# # Ligand symmetry lookup table (optional for protein-only training).
+# # If you have one, set this to the pickled file or instantiate
+# # `boltz_data_pipeline.feature.symmetry.get_symmetries`.
+# symmetries: {}
+symmetries: /home/nobilm@usi.ch/ml-simplefold/symmetry.pkl
 max_tokens: 256
 max_atoms: 2304
 pad_to_max_tokens: False

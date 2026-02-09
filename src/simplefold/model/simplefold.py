@@ -26,9 +26,9 @@ from fairscale.nn.wrap import enable_wrap, wrap
 from utils.esm_utils import _af2_to_esm, esm_registry
 from boltz_data_pipeline.types import Record, Structure
 from utils.boltz_utils import (
-    weighted_rigid_align, 
+    weighted_rigid_align,
     center_random_augmentation,
-    process_structure, 
+    process_structure,
     save_structure
 )
 
@@ -150,7 +150,7 @@ class SimpleFold(pl.LightningModule):
         return loss
 
     def smooth_lddt_loss(
-        self, 
+        self,
         pred_coords,
         true_coords,
         # is_nucleotide,
@@ -589,13 +589,13 @@ class SimpleFold(pl.LightningModule):
                         sampled_struct_dir = Path(sample_dir)
                         outname = f"{record.id}_sampled_{str(file_id)}"
                         save_structure(
-                            sampled_structure, sampled_struct_dir, outname, 
+                            sampled_structure, sampled_struct_dir, outname,
                             plddts=plddts[j] if plddts is not None else None,
                             output_format="mmcif",
                         )
                         # save pdb structure
                         save_structure(
-                            sampled_structure, sampled_struct_dir, outname, 
+                            sampled_structure, sampled_struct_dir, outname,
                             plddts=plddts[j] if plddts is not None else None,
                             output_format="pdb",
                         )

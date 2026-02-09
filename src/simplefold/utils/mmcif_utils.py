@@ -7,6 +7,7 @@
 # licensed under MIT License, Copyright (c) 2024 Jeremy Wohlwend, Gabriele Corso, Saro Passaro. 
 
 import contextlib
+import warnings
 from dataclasses import dataclass, replace
 from typing import Optional
 
@@ -834,42 +835,20 @@ def parse_connection(
     return conn
 
 
-def parse_mmcif(
-    path: str,
+def _parse_gemmi_structure(
+    *,
+    structure: gemmi.Structure,
     components: dict[str, Mol],
-    use_assembly: bool = True,
+    deposited: str,
+    released: str,
+    revised: str,
+    resolution: float,
+    method: str,
+    use_assembly: bool,
+    chain_mode: str,
+    source_path: str,
 ) -> ParsedStructure:
-    """Parse a structure in MMCIF format.
-
-    Parameters
-    ----------
-    mmcif_file : PathLike
-        Path to the MMCIF file.
-    components: dict[str, Mol]
-        The preprocessed PDB components dictionary.
-    use_assembly: bool
-        Whether to use the first assembly.
-
-    Returns
-    -------
-    ParsedStructure
-        The parsed structure.
-
-    """
-    # Disable rdkit warnings
-    blocker = rdBase.BlockLogs()  # noqa: F841
-
-    # Parse MMCIF input file
-    block = gemmi.cif.read(str(path))[0]
-
-    # Extract medatadata
-    deposit_date, release_date, revision_date = get_dates(block)
-    resolution = get_resolution(block)
-    method = get_method(block)
-
-    # Load structure object
-    structure = gemmi.make_structure_from_block(block)
-
+    """Parse an in-memory gemmi Structure into SimpleFold datatypes."""
     # Clean up the structure
     structure.merge_chain_parts()
     structure.remove_waters()
@@ -877,11 +856,20 @@ def parse_mmcif(
     structure.remove_alternative_conformations()
     structure.remove_empty_chains()
 
-    # Expand assembly 1
+    # Expand assembly 1 (if present)
     if use_assembly and structure.assemblies:
         how = gemmi.HowToNameCopiedChain.AddNumber
         assembly_name = structure.assemblies[0].name
-        structure.transform_to_assembly(assembly_name, how=how)
+        try:
+            structure.transform_to_assembly(assembly_name, how=how)
+        except RuntimeError as exc:
+            if "no subchain" not in str(exc):
+                raise
+            warnings.warn(
+                f"Failed to apply assembly '{assembly_name}' for {source_path} ({exc}); "
+                "falling back to asymmetric unit.",
+                RuntimeWarning,
+            )
 
     # Create mapping from chain, residue to subchains
     # since a Connection uses the chains and not subchins
@@ -890,30 +878,48 @@ def parse_mmcif(
         for residue in chain:
             seq_id = residue.seqid
             seq_id = str(seq_id.num) + str(seq_id.icode).strip()
-            subchain_map[(chain.name, seq_id)] = residue.subchain
+            subchain = residue.subchain
+            if chain_mode == "chains" and not subchain:
+                subchain = chain.name
+            subchain_map[(chain.name, seq_id)] = subchain
 
     # Parse chains
     chains: list[ParsedChain] = []
     chain_seqs = []
-    for i, raw_chain in enumerate(structure[0].subchains()):
-        # Check chain type
-        subchain_id = raw_chain.subchain_id()
-        # entity: gemmi.Entity = entities[subchain_id]
-        # entity_type = entity.entity_type.name
-        sequence = raw_chain.extract_sequence()
 
-        # Add polymer if successful
-        parsed_polymer = parse_polymer(
-            polymer=raw_chain,
-            polymer_type=gemmi.PolymerType.PeptideL,
-            sequence=sequence,
-            chain_id=subchain_id,
-            entity=str(i),
-            components=components,
-        )
-        if parsed_polymer is not None:
-            chains.append(parsed_polymer)
-            chain_seqs.append(parsed_polymer.sequence)
+    if chain_mode == "subchains":
+        for i, raw_chain in enumerate(structure[0].subchains()):
+            subchain_id = raw_chain.subchain_id()
+            sequence = raw_chain.extract_sequence()
+            parsed_polymer = parse_polymer(
+                polymer=raw_chain,
+                polymer_type=gemmi.PolymerType.PeptideL,
+                sequence=sequence,
+                chain_id=subchain_id,
+                entity=str(i),
+                components=components,
+            )
+            if parsed_polymer is not None:
+                chains.append(parsed_polymer)
+                chain_seqs.append(parsed_polymer.sequence)
+    elif chain_mode == "chains":
+        for i, raw_chain in enumerate(structure[0]):
+            polymer = raw_chain.whole()
+            sequence = polymer.extract_sequence()
+            parsed_polymer = parse_polymer(
+                polymer=polymer,
+                polymer_type=gemmi.PolymerType.PeptideL,
+                sequence=sequence,
+                chain_id=raw_chain.name,
+                entity=str(i),
+                components=components,
+            )
+            if parsed_polymer is not None:
+                chains.append(parsed_polymer)
+                chain_seqs.append(parsed_polymer.sequence)
+    else:
+        msg = f"Unknown chain_mode: {chain_mode}"
+        raise ValueError(msg)
 
     # If no chains parsed fail
     if not chains:
@@ -1047,9 +1053,9 @@ def parse_mmcif(
 
     # Return parsed structure
     info = StructureInfo(
-        deposited=deposit_date,
-        revised=revision_date,
-        released=release_date,
+        deposited=deposited,
+        revised=revised,
+        released=released,
         resolution=resolution,
         method=method,
         num_chains=len(chains),
@@ -1067,3 +1073,96 @@ def parse_mmcif(
     )
 
     return ParsedStructure(data=data, info=info, covalents=[])
+
+
+def parse_mmcif(
+    path: str,
+    components: dict[str, Mol],
+    use_assembly: bool = True,
+) -> ParsedStructure:
+    """Parse a structure in MMCIF format.
+
+    Parameters
+    ----------
+    mmcif_file : PathLike
+        Path to the MMCIF file.
+    components: dict[str, Mol]
+        The preprocessed PDB components dictionary.
+    use_assembly: bool
+        Whether to use the first assembly.
+
+    Returns
+    -------
+    ParsedStructure
+        The parsed structure.
+
+    """
+    # Disable rdkit warnings
+    blocker = rdBase.BlockLogs()  # noqa: F841
+
+    # Parse MMCIF input file
+    block = gemmi.cif.read(str(path))[0]
+
+    # Extract medatadata
+    deposit_date, release_date, revision_date = get_dates(block)
+    resolution = get_resolution(block)
+    method = get_method(block)
+
+    # Load structure object
+    structure = gemmi.make_structure_from_block(block)
+
+    return _parse_gemmi_structure(
+        structure=structure,
+        components=components,
+        deposited=deposit_date,
+        released=release_date,
+        revised=revision_date,
+        resolution=resolution,
+        method=method,
+        use_assembly=use_assembly,
+        chain_mode="subchains",
+        source_path=str(path),
+    )
+
+
+def parse_pdb(
+    path: str,
+    components: dict[str, Mol],
+    use_assembly: bool = True,
+) -> ParsedStructure:
+    """Parse a structure in PDB format.
+
+    Parameters
+    ----------
+    path : PathLike
+        Path to the PDB file.
+    components: dict[str, Mol]
+        The preprocessed PDB components dictionary.
+    use_assembly: bool
+        Whether to use the first assembly (if present).
+
+    Returns
+    -------
+    ParsedStructure
+        The parsed structure.
+
+    """
+    # Disable rdkit warnings
+    blocker = rdBase.BlockLogs()  # noqa: F841
+
+    # Load structure object
+    structure = gemmi.read_structure(str(path))
+
+    # PDB typically doesn't have the mmCIF metadata fields used above.
+    return _parse_gemmi_structure(
+        structure=structure,
+        components=components,
+        deposited="",
+        released="",
+        revised="",
+        resolution=0.0,
+        method="",
+        use_assembly=use_assembly,
+        chain_mode="chains",
+        source_path=str(path),
+    )

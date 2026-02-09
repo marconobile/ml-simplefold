@@ -110,16 +110,37 @@ Of course, one can use own customized datasets to train or tune SimpleFold model
 
 #### Process mmcif structures
 
+`process_mmcif.py` expects a local directory of mmCIF files (e.g., `*.cif` or `*.cif.gz`). If your `--data_dir` is empty, it will process `0` entries.
+
+For a quick smoke test, you can download a single PDB entry in mmCIF format:
+```
+mkdir -p data/mmcif
+wget -O data/mmcif/1ubq.cif.gz https://files.rcsb.org/download/1UBQ.cif.gz
+```
+To download the full PDB mmCIF archive, use the RCSB rsync mirror (this is large):
+```
+rsync -rlpt -z --delete rsync.rcsb.org::ftp-data/structures/divided/mmCIF/ data/mmcif/
+```
+
 To process downloaded mmcif files, you need [Redis](https://redis.io/docs/latest/operate/oss_and_stack/install/archive/install-redis/) installed and launch the Redis server:
 ```
 wget https://boltz1.s3.us-east-2.amazonaws.com/ccd.rdb
 redis-server --dbfilename ccd.rdb --port 7777
 ```
+Note: run `redis-server` from the directory that contains `ccd.rdb`, or pass `--dir /path/to/ccd_dir` so Redis can load the database.
 You can then process mmcif files to input format for SimpleFold:
 ```
 python src/simplefold/process_mmcif.py \
     --data_dir [MMCIF_DIR]   # directory of mmcif files
     --out_dir [OUTPUT_DIR]   # directory of processed targets
+    --use-assembly
+```
+
+If you already have structures as PDB files (e.g., `*.pdb` / `*.pdb.gz`), you can produce the same `structures/`, `records/`, and `manifest.json` outputs via:
+```
+python src/simplefold/process_pdb.py \
+    --data_dir [PDB_DIR] \
+    --out_dir [OUTPUT_DIR] \
     --use-assembly
 ```
 To further tokenize the processed structures:

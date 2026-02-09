@@ -37,3 +37,5 @@ def main():
 
     print(f"Running protein folding with SimpleFold ...")
     predict_structures_from_fastas(args)
+
+main()

@@ -3,8 +3,8 @@
 # Copyright (c) 2025 Apple Inc. Licensed under MIT License.
 #
 
-# Started from https://github.com/jwohlwend/boltz, 
-# licensed under MIT License, Copyright (c) 2024 Jeremy Wohlwend, Gabriele Corso, Saro Passaro. 
+# Started from https://github.com/jwohlwend/boltz,
+# licensed under MIT License, Copyright (c) 2024 Jeremy Wohlwend, Gabriele Corso, Saro Passaro.
 
 import argparse
 import json
@@ -26,13 +26,13 @@ from p_tqdm import p_umap
 from boltz_data_pipeline.filter.static.filter import StaticFilter
 from boltz_data_pipeline.filter.static.ligand import ExcludedLigands
 from boltz_data_pipeline.filter.static.polymer import (
-    ClashingChainsFilter, 
-    ConsecutiveCA, 
-    MinimumLengthFilter, 
-    UnknownFilter
+    ClashingChainsFilter,
+    ConsecutiveCA,
+    MinimumLengthFilter,
+    UnknownFilter,
 )
 from boltz_data_pipeline.types import ChainInfo, Record, Target
-from utils.mmcif_utils import parse_mmcif
+from utils.mmcif_utils import parse_pdb
 
 
 """
@@ -44,8 +44,8 @@ before running the script to start the redis server with the CCD data.
 
 
 @dataclass(frozen=True, slots=True)
-class PDB:
-    """A raw MMCIF PDB file."""
+class PDBFile:
+    """A raw PDB structure file."""
 
     id: str
     path: str
@@ -73,20 +73,20 @@ class Resource:
         return out
 
 
-def fetch(data_dir: Path, max_file_size: Optional[int] = None) -> list[PDB]:
+def fetch(data_dir: Path, max_file_size: Optional[int] = None) -> list[PDBFile]:
     """Fetch the PDB files."""
-    data = []
+    data: list[PDBFile] = []
     excluded = 0
-    for file in chain(data_dir.rglob("*.cif*"), data_dir.rglob("*.mmcif*")):
-        # Derive a stable ID from the filename (handles `.cif` and `.cif.gz`).
-        pdb_id = file.name.lower()
+    for file in chain(data_dir.rglob("*.pdb*"), data_dir.rglob("*.ent*")):
+        # Derive a stable ID from the filename (handles `.pdb` and `.pdb.gz`).
+        record_id = file.name.lower()
         for compression_suffix in (".gz", ".bz2", ".xz", ".zip"):
-            if pdb_id.endswith(compression_suffix):
-                pdb_id = pdb_id[: -len(compression_suffix)]
+            if record_id.endswith(compression_suffix):
+                record_id = record_id[: -len(compression_suffix)]
                 break
-        for cif_suffix in (".cif", ".mmcif"):
-            if pdb_id.endswith(cif_suffix):
-                pdb_id = pdb_id[: -len(cif_suffix)]
+        for pdb_suffix in (".pdb", ".ent"):
+            if record_id.endswith(pdb_suffix):
+                record_id = record_id[: -len(pdb_suffix)]
                 break
 
         # Check file size and skip if too large
@@ -94,28 +94,19 @@ def fetch(data_dir: Path, max_file_size: Optional[int] = None) -> list[PDB]:
             excluded += 1
             continue
 
-        # Create the target
-        target = PDB(id=pdb_id, path=str(file))
-        data.append(target)
+        data.append(PDBFile(id=record_id, path=str(file)))
 
     if not data:
         print(
-            f"No mmCIF files found under {data_dir} (expected files matching '*.cif*' or '*.mmcif*'). "
-            "Did you download the mmCIF(s) and point --data_dir to the right folder?"
+            f"No PDB files found under {data_dir} (expected files matching '*.pdb*' or '*.ent*'). "
+            "Did you place your PDB(s) there and point --data_dir to the right folder?"
         )
     print(f"Excluded {excluded} files due to size.")
     return data
 
 
 def finalize(out_dir: Path) -> None:
-    """Run post-processing in main thread.
-
-    Parameters
-    ----------
-    out_dir : Path
-        The output directory.
-
-    """
+    """Run post-processing in main thread."""
     # Group records into a manifest
     records_dir = out_dir / "records"
 
@@ -126,7 +117,7 @@ def finalize(out_dir: Path) -> None:
         try:
             with path.open("r") as f:
                 records.append(json.load(f))
-        except:
+        except Exception:
             failed_count += 1
             print(f"Failed to parse {record}")
     print(f"Failed to parse {failed_count} entries")
@@ -137,31 +128,14 @@ def finalize(out_dir: Path) -> None:
         json.dump(records, f)
 
 
-def parse(data: PDB, resource: Resource, clusters: dict, use_assembly: bool) -> Target:
-    """Process a structure.
-
-    Parameters
-    ----------
-    data : PDB
-        The raw input data.
-    resource: Resource
-        The shared resource.
-
-    Returns
-    -------
-    Target
-        The processed data.
-
-    """
-    # Get the PDB id
+def parse(data: PDBFile, resource: Resource, clusters: dict, use_assembly: bool) -> Target:
+    """Process a structure."""
     pdb_id = data.id.lower()
 
-    # Parse structure
-    parsed = parse_mmcif(data.path, resource, use_assembly=use_assembly)
+    parsed = parse_pdb(data.path, resource, use_assembly=use_assembly)
     structure = parsed.data
     structure_info = parsed.info
 
-    # Create chain metadata
     chain_info = []
     for i, chain in enumerate(structure.chains):
         key = f"{pdb_id}_{chain['entity_id']}"
@@ -176,7 +150,6 @@ def parse(data: PDB, resource: Resource, clusters: dict, use_assembly: bool) -> 
             )
         )
 
-    # Create record
     record = Record(
         id=data.id,
         structure=structure_info,
@@ -188,26 +161,14 @@ def parse(data: PDB, resource: Resource, clusters: dict, use_assembly: bool) -> 
 
 
 def process_structure(
-    data: PDB,
+    data: PDBFile,
     resource: Resource,
     out_dir: Path,
     filters: list[StaticFilter],
     clusters: dict,
     use_assembly: bool,
 ) -> None:
-    """Process a target.
-
-    Parameters
-    ----------
-    item : PDB
-        The raw input data.
-    resource: Resource
-        The shared resource.
-    out_dir : Path
-        The output directory.
-
-    """
-    # Check if we need to process
+    """Process a target."""
     struct_path = out_dir / "structures" / f"{data.id}.npz"
     record_path = out_dir / "records" / f"{data.id}.json"
 
@@ -215,11 +176,9 @@ def process_structure(
         return
 
     try:
-        # Parse the target
         target: Target = parse(data, resource, clusters, use_assembly=use_assembly)
         structure = target.structure
 
-        # Apply the filters
         mask = structure.mask
         if filters is not None:
             for f in filters:
@@ -231,13 +190,13 @@ def process_structure(
         return
 
     # Replace chains and interfaces
-    chains = []
+    chains_out = []
     for i, chain in enumerate(target.record.chains):
-        chains.append(replace(chain, valid=bool(mask[i])))
+        chains_out.append(replace(chain, valid=bool(mask[i])))
 
     # Replace structure and record
     structure = replace(structure, mask=mask)
-    record = replace(target.record, chains=chains, interfaces=[])
+    record = replace(target.record, chains=chains_out, interfaces=[])
     target = replace(target, structure=structure, record=record)
 
     # Dump structure
@@ -250,7 +209,6 @@ def process_structure(
 
 def process(args) -> None:
     """Run the data processing task."""
-    # Create output directory
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     # Create output directories
@@ -290,7 +248,6 @@ def process(args) -> None:
     # Run processing
     print("Processing data...")
     if parallel:
-        # Create processing function
         fn = partial(
             process_structure,
             resource=resource,
@@ -299,7 +256,6 @@ def process(args) -> None:
             filters=filters,
             use_assembly=args.use_assembly,
         )
-        # Run processing in parallel
         p_umap(fn, data, num_cpus=num_processes)
     else:
         for item in tqdm(data):
@@ -317,12 +273,12 @@ def process(args) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Process MMCIF data.")
+    parser = argparse.ArgumentParser(description="Process PDB data.")
     parser.add_argument(
         "--data_dir",
         type=Path,
         required=True,
-        help="The data containing the MMCIF files.",
+        help="The directory containing the PDB files.",
     )
     parser.add_argument(
         "--out_dir",
@@ -360,3 +316,4 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     process(args)
+

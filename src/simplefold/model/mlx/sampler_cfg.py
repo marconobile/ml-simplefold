@@ -3,16 +3,24 @@
 # Copyright (c) 2025 Apple Inc. Licensed under MIT License.
 #
 
-import torch
+import mlx.core as mx
 from tqdm import tqdm
-from einops import repeat
-from utils.boltz_utils import center_random_augmentation
+from einops.array_api import repeat
+from utils.mlx_utils import center_random_augmentation
 
 
-class EMSampler():
+def logspace(start, end, steps, base=10.0, dtype=mx.float32):
+    # create a linear space between start and end
+    lin = mx.linspace(start, end, steps, dtype=dtype)
+    # raise base to that power
+    return mx.power(mx.array(base, dtype=dtype), lin)
+
+
+class EMSampler:
     """
     A Euler-Maruyama solver for SDEs.
     """
+
     def __init__(
         self,
         num_timesteps=500,
@@ -32,14 +40,12 @@ class EMSampler():
         self.conditioning_key = conditioning_key
 
         if self.log_timesteps:
-            t = 1.0 - torch.logspace(-2, 0, self.num_timesteps + 1).flip(0)
-            t = t - torch.min(t)
-            t = t / torch.max(t)
-            self.steps = t.clamp(min=self.t_start, max=1.0)
+            t = 1.0 - logspace(-2, 0, steps=self.num_timesteps + 1)[::-1, ...]
+            t = t - mx.min(t)
+            t = t / mx.max(t)
+            self.steps = mx.clip(t, a_min=self.t_start, a_max=1.0)
         else:
-            self.steps = torch.linspace(
-                self.t_start, 1.0, steps=self.num_timesteps + 1
-            )
+            self.steps = mx.linspace(self.t_start, 1.0, num=self.num_timesteps + 1)
 
     def diffusion_coefficient(self, t, eps=0.01):
         # determine diffusion coefficient
@@ -48,20 +54,19 @@ class EMSampler():
             w = 0.0
         return w
 
-    @torch.no_grad()
     def euler_maruyama_step(
         self,
         model_fn,
         flow,
-        y, 
-        t, 
-        t_next, 
-        batch, 
+        y,
+        t,
+        t_next,
+        batch,
         model_fn_conditioned=None,
         c=None,
     ):
         dt = t_next - t
-        eps = torch.randn_like(y).to(y)
+        eps = mx.random.normal(y.shape)
 
         y = center_random_augmentation(
             y,
@@ -75,7 +80,7 @@ class EMSampler():
             noised_pos=y,
             t=batched_t,
             feats=batch,
-        )['predict_velocity']
+        )["predict_velocity"]
 
         use_guidance = (
             model_fn_conditioned is not None
@@ -83,8 +88,7 @@ class EMSampler():
             and self.guidance_scale is not None
         )
         if use_guidance:
-            if hasattr(c, "to"):
-                c = c.to(y)
+            c = mx.array(c)
             velocity_cond = model_fn_conditioned(
                 noised_pos=y,
                 t=batched_t,
@@ -102,11 +106,10 @@ class EMSampler():
         diff_coeff = self.diffusion_coefficient(t)
         drift = velocity + diff_coeff * score
         mean_y = y + drift * dt
-        y_sample = mean_y + torch.sqrt(2.0 * dt * diff_coeff * self.tau) * eps
+        y_sample = mean_y + mx.sqrt(2.0 * dt * diff_coeff * self.tau) * eps
 
         return y_sample
 
-    @torch.no_grad()
     def sample(
         self,
         model_fn,
@@ -117,7 +120,7 @@ class EMSampler():
         c=None,
     ):
         sampling_timesteps = self.num_timesteps
-        steps = self.steps.to(noise.device)
+        steps = self.steps
         y_sampled = noise
         feats = batch
         if c is None and isinstance(feats, dict):
@@ -141,7 +144,6 @@ class EMSampler():
                 model_fn_conditioned=model_fn_conditioned,
                 c=c,
             )
+            mx.eval(y_sampled)
 
-        return {
-            "denoised_coords": y_sampled
-        }
+        return {"denoised_coords": y_sampled}
