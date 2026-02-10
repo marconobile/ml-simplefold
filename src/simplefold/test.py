@@ -85,8 +85,8 @@ def test(cfg):
 @hydra.main(version_base="1.3", config_path="../../configs", config_name="base_eval.yaml")
 def submit_run(cfg):
     OmegaConf.resolve(cfg)
-    extras(cfg)
     create_folders(cfg)
+    extras(cfg)
     test(cfg)
     return
 

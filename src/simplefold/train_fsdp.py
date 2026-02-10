@@ -16,8 +16,10 @@ from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 
 from model.torch.blocks import DiTBlock
 from utils.utils import (
+    configure_runtime_temp_dir,
     extras,
     create_folders,
+    normalize_runtime_paths,
     task_wrapper,
 )
 from utils.instantiators import (
@@ -112,8 +114,10 @@ def train(cfg):
 @hydra.main(version_base="1.3", config_path="../../configs", config_name="base_train.yaml")
 def submit_run(cfg):
     OmegaConf.resolve(cfg)
-    extras(cfg)
+    normalize_runtime_paths(cfg)
     create_folders(cfg)
+    configure_runtime_temp_dir(cfg)
+    extras(cfg)
     train(cfg)
     return
 

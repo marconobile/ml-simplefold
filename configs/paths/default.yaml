@@ -1,9 +1,9 @@
 # path to root directory
 # this requires PROJECT_ROOT environment variable to exist
 # you can replace it with "." if you want the root to be the current working directory
-root_dir: "./"
+root_dir: "/storage_common/nobilm/ml-simplefold/"
 
-tmp_dir: ${paths.root_dir}tmp/
+tmp_dir: ${paths.output_dir}/tmp/
 
 # path to data directory
 data_dir: ${paths.root_dir}data/

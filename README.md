@@ -32,19 +32,19 @@ conda create -n simplefold python=3.10
 conda activate simplefold
 python -m pip install -U pip build; pip install -e .
 ```
-If you want to use MLX backend on Apple silicon: 
+If you want to use MLX backend on Apple silicon:
 ```
 pip install mlx==0.28.0
 pip install git+https://github.com/facebookresearch/esm.git
 ```
 
-## Example 
+## Example
 
-We provide a jupyter notebook [`sample.ipynb`](sample.ipynb) to predict protein structures from example protein sequences. 
+We provide a jupyter notebook [`sample.ipynb`](sample.ipynb) to predict protein structures from example protein sequences.
 
 ## Inference
 
-Once you have `simplefold` package installed, you can predict the protein structure from target fasta file(s) via the following command line. We provide support for both [PyTorch](https://pytorch.org/) and [MLX](https://mlx-framework.org/) (recommended for Apple hardware) backends in inference. 
+Once you have `simplefold` package installed, you can predict the protein structure from target fasta file(s) via the following command line. We provide support for both [PyTorch](https://pytorch.org/) and [MLX](https://mlx-framework.org/) (recommended for Apple hardware) backends in inference.
 ```
 simplefold \
     --simplefold_model simplefold_100M \  # specify folding model in simplefold_100M/360M/700M/1.1B/1.6B/3B
@@ -53,7 +53,7 @@ simplefold \
     --plddt \                           # output pLDDT
     --fasta_path [FASTA_PATH] \         # path to the target fasta directory or file
     --output_dir [OUTPUT_DIR] \         # path to the output directory
-    --backend [mlx, torch]              # choose from MLX and PyTorch for inference backend 
+    --backend [mlx, torch]              # choose from MLX and PyTorch for inference backend
 ```
 
 ## Evaluation
@@ -75,7 +75,7 @@ python src/simplefold/evaluation/analyze_folding.py \
 ```
 To evaluate results of two-state prediction (i.e., Apo/CoDNaS), one need to compile the [TMsore](https://zhanggroup.org/TM-score/TMscore.cpp) and then run evaluation via:
 ```
-python src/simplefold/evaluation/analyze_two_state.py \ 
+python src/simplefold/evaluation/analyze_two_state.py \
     --data_dir [PATH_TO_TARGET_DATA_DIRECTORY] \
     --sample_dir [PATH_TO_PREDICTED_PDB] \
     --tm_bin [PATH_TO_TMscore_BINARY] \
@@ -85,7 +85,7 @@ python src/simplefold/evaluation/analyze_two_state.py \
 
 ## Train
 
-You can also train or tune SimpleFold on your end. Instructions below include details for SimpleFold training. 
+You can also train or tune SimpleFold on your end. Instructions below include details for SimpleFold training.
 
 ### Data preparation
 
@@ -106,7 +106,7 @@ In `afesme_dict.json`, the data is stored in the following structure:
 }
 ```
 
-Of course, one can use own customized datasets to train or tune SimpleFold models. Instructions below list how to process the dataset for SimpleFold training. 
+Of course, one can use own customized datasets to train or tune SimpleFold models. Instructions below list how to process the dataset for SimpleFold training.
 
 #### Process mmcif structures
 
@@ -143,12 +143,27 @@ python src/simplefold/process_pdb.py \
     --out_dir [OUTPUT_DIR] \
     --use-assembly
 ```
+Example:
+
+'''
+# step 1:
+#! this requires redis to be running: redis-server --dbfilename ccd.rdb --port 7777
+# python src/simplefold/process_pdb.py --data_dir data/pdb_inapo --out_dir data/target_inapo --use-assembly
+# or
+# python src/simplefold/process_pdb.py --data_dir /home/nobilm@usi.ch/ml-simplefold/data/pdb_for_train_test --out_dir /home/nobilm@usi.ch/ml-simplefold/training_data --use-assembly
+# -> output: /home/nobilm@usi.ch/ml-simplefold/data/target_inapo
+'''
+
 To further tokenize the processed structures:
 ```
 python src/simplefold/process_structure.py \
     --target_dir [TARGET_DIR]   # directory of processed targets
     --token_dir [TOKEN_DIR]   # directory of tokenized data
 ```
+
+# step 2:
+# python src/simplefold/process_structure.py --target_dir /home/nobilm@usi.ch/ml-simplefold/training_data --token_dir /home/nobilm@usi.ch/ml-simplefold/training_data
+#
 
 ### Training
 
@@ -160,6 +175,15 @@ To train SimpleFold with FSDP strategy:
 ```
 python train_fsdp.py experiment=train_fsdp
 ```
+
+this runs from scratch:
+CUDA_VISIBLE_DEVICES=0 python src/simplefold/train.py experiment=train \
+  hydra.job.name=inapo_2ep_gpu0 \
+  paths.output_dir=/home/nobilm@usi.ch/ml-simplefold/artifacts/inapo_2ep_gpu0 \
+  trainer.accelerator=gpu trainer.devices=1 +trainer.max_epochs=2
+
+from checkpoint:
+CUDA_VISIBLE_DEVICES=0 python src/simplefold/train.py experiment=train   hydra.job.name=inapo_1000ep_gpu0   paths.output_dir=/storage_common/nobilm/ml-simplefold/artifacts/inapo_1000ep_gpu0   +load_ckpt_path=/home/nobilm@usi.ch/ml-simplefold/artifacts/simplefold_100M.ckpt   trainer.accelerator=gpu trainer.devices=1 +trainer.max_epochs=10   callbacks.model_checkpoint.dirpath=/storage_common/nobilm/ml-simplefold/artifacts/inapo_1000ep_gpu0/checkpoints   "callbacks.model_checkpoint.filename='sf100M-ep{epoch:04d}-step{step:08d}'"   +callbacks.model_checkpoint.every_n_epochs=3   callbacks.model_checkpoint.save_on_train_epoch_end=True   callbacks.model_checkpoint.every_n_train_steps=null
 
 ## Citation
 If you found this code useful, please cite the following paper:
@@ -173,7 +197,7 @@ If you found this code useful, please cite the following paper:
 ```
 
 ## Acknowledgements
-Our codebase is built using multiple opensource contributions, please see [ACKNOWLEDGEMENTS](ACKNOWLEDGEMENTS) for more details. 
+Our codebase is built using multiple opensource contributions, please see [ACKNOWLEDGEMENTS](ACKNOWLEDGEMENTS) for more details.
 
 ## License
 Please check out the repository [LICENSE](LICENSE) before using the provided code and

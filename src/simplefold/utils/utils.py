@@ -4,13 +4,13 @@
 #
 
 import os
+import tempfile
 import rich
 import rich.syntax
 import rich.tree
 from rich.prompt import Prompt
 import warnings
 from typing import Any, Callable, Dict, Tuple
-from omegaconf import DictConfig
 from pathlib import Path
 from typing import Sequence
 from hydra.core.hydra_config import HydraConfig
@@ -108,6 +108,65 @@ def enforce_tags(cfg: DictConfig, save_to_file: bool = False) -> None:
     if save_to_file:
         with open(Path(cfg.paths.output_dir, "tags.log"), "w") as file:
             rich.print(cfg.tags, file=file)
+
+
+def _to_absolute_path(path_value: str, cwd: Path) -> str:
+    path = Path(str(path_value)).expanduser()
+    if not path.is_absolute():
+        path = cwd / path
+    return str(path.resolve())
+
+
+def normalize_runtime_paths(cfg: DictConfig) -> None:
+    """Normalizes training output paths to absolute paths before creating folders."""
+    if not cfg.get("paths"):
+        return
+
+    cwd = Path(cfg.paths.get("work_dir", os.getcwd())).expanduser().resolve()
+
+    with open_dict(cfg):
+        cfg.paths.tmp_dir = _to_absolute_path(cfg.paths.tmp_dir, cwd)
+        cfg.paths.output_dir = _to_absolute_path(cfg.paths.output_dir, cwd)
+        cfg.paths.sample_dir = _to_absolute_path(cfg.paths.sample_dir, cwd)
+
+        if cfg.get("trainer") and cfg.trainer.get("default_root_dir"):
+            cfg.trainer.default_root_dir = _to_absolute_path(
+                cfg.trainer.default_root_dir, cwd
+            )
+
+        if (
+            cfg.get("callbacks")
+            and cfg.callbacks.get("model_checkpoint")
+            and cfg.callbacks.model_checkpoint.get("dirpath")
+        ):
+            cfg.callbacks.model_checkpoint.dirpath = _to_absolute_path(
+                cfg.callbacks.model_checkpoint.dirpath, cwd
+            )
+
+        if (
+            cfg.get("logger")
+            and cfg.logger.get("tensorboard")
+            and cfg.logger.tensorboard.get("save_dir")
+        ):
+            cfg.logger.tensorboard.save_dir = _to_absolute_path(
+                cfg.logger.tensorboard.save_dir, cwd
+            )
+
+
+def configure_runtime_temp_dir(cfg: DictConfig) -> None:
+    """Routes tempfile-backed writes (e.g. checkpoint atomic saves) to cfg.paths.tmp_dir."""
+    if not cfg.get("paths") or not cfg.paths.get("tmp_dir"):
+        return
+
+    tmp_dir = Path(cfg.paths.tmp_dir).expanduser().resolve()
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir_str = str(tmp_dir)
+
+    os.environ["TMPDIR"] = tmp_dir_str
+    os.environ["TMP"] = tmp_dir_str
+    os.environ["TEMP"] = tmp_dir_str
+    tempfile.tempdir = tmp_dir_str
+    log.info(f"Using temp dir: {tmp_dir_str}")
 
 
 def create_folders(cfg: DictConfig) -> None:

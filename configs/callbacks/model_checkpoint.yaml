@@ -3,7 +3,7 @@
 model_checkpoint:
   # _target_: utils.modelcheckpoint_timestamp.DynamicTimestampModelCheckpoint
   _target_: lightning.pytorch.callbacks.ModelCheckpoint
-  dirpath: artifacts/checkpoints # We need to modify this base on distributed or not
+  dirpath: ${paths.output_dir}/checkpoints
   filename: "model-best-step{step:08d}-loss{loss/mse_epoch:.6f}" # checkpoint filename
   monitor: "trainer/global_step" # name of the logged metric which determines when model is improving
   verbose: True # verbosity mode

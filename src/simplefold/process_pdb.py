@@ -9,6 +9,7 @@
 import argparse
 import json
 import multiprocessing
+import os
 import pickle
 import traceback
 from dataclasses import asdict, dataclass, replace
@@ -56,11 +57,38 @@ class Resource:
 
     def __init__(self, host: str, port: int) -> None:
         """Initialize the redis database."""
-        self._redis = Redis(host=host, port=port)
+        self._host = host
+        self._port = port
+        self._redis: Optional[Redis] = None
+        self._pid: Optional[int] = None
+
+    def _get_redis(self) -> Redis:
+        """Get a redis client that is safe to use in the current process."""
+        pid = os.getpid()
+        if self._redis is None or self._pid != pid:
+            # Avoid sharing connection pools across processes.
+            self._redis = Redis(host=self._host, port=self._port)
+            self._pid = pid
+        return self._redis
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Avoid pickling redis connection pools across processes."""
+        return {
+            "_host": self._host,
+            "_port": self._port,
+            "_redis": None,
+            "_pid": None,
+        }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self._host = state["_host"]
+        self._port = state["_port"]
+        self._redis = None
+        self._pid = None
 
     def get(self, key: str) -> Any:
         """Get an item from the Redis database."""
-        value = self._redis.get(key)
+        value = self._get_redis().get(key)
         if value is not None:
             value = pickle.loads(value)
         return value
@@ -316,4 +344,3 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     process(args)
-
