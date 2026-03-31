@@ -105,7 +105,7 @@ class EMSampler():
                 )["predict_velocity"]
 
                 t_pad = flow.right_pad_dims_to(y_for_grad, batched_t_grad)
-                x0_hat = y_for_grad + (1.0 - t_pad) * velocity_grad
+                x0_hat = y_for_grad + (1.0 - t_pad) * velocity_grad #! this must be checked
 
                 # center target into the same frame as the model input / x0_hat
                 target_atom_coords = target_atom_coords.to(y_for_grad)
@@ -118,7 +118,7 @@ class EMSampler():
 
                 residual = (target_centered - A_fn(x0_hat)) * atom_pad_mask_3d
                 residual_l2_norm = torch.sum(residual * residual)
-                k = (2/t**2)/residual.abs()
+                k = (2/t**2)/torch.sum(residual.abs())
                 conditioning_loss = 0.5 * k * residual_l2_norm
 
                 grad_conditioning = torch.autograd.grad(
