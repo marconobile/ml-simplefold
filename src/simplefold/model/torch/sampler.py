@@ -9,6 +9,9 @@ from einops import repeat
 from utils.boltz_utils import center_random_augmentation
 
 
+def A_fn(x):
+    return x
+
 class EMSampler():
     """
     A Euler-Maruyama solver for SDEs.
@@ -48,56 +51,86 @@ class EMSampler():
             w = 0.0
         return w
 
-    @torch.no_grad()
+
     def euler_maruyama_step(
         self,
         model_fn,
         flow,
-        y, 
-        t, 
-        t_next, 
-        batch, 
-        model_fn_conditioned=None,
-        c=None,
+        y,
+        t,
+        t_next,
+        batch,
     ):
         dt = t_next - t
         eps = torch.randn_like(y).to(y)
 
+        atom_pad_mask = batch["atom_pad_mask"]
+        atom_pad_mask_3d = atom_pad_mask[..., None].to(y)
+
+        # work in the same centered frame used by the model
         y = center_random_augmentation(
             y,
-            batch["atom_pad_mask"],
+            atom_pad_mask,
             augmentation=False,
             centering=True,
         )
 
-        batched_t = repeat(t, " -> b", b=y.shape[0])
-        velocity_uncond = model_fn(
-            noised_pos=y,
-            t=batched_t,
-            feats=batch,
-        )['predict_velocity']
+        batched_t = repeat(t, " -> b", b=y.shape[0]).to(y)
 
-        use_guidance = (
-            model_fn_conditioned is not None
-            and c is not None
-            and self.guidance_scale is not None
-        )
-        if use_guidance:
-            if hasattr(c, "to"):
-                c = c.to(y)
-            velocity_cond = model_fn_conditioned(
+        # base model prediction and score
+        with torch.no_grad():
+            velocity = model_fn(
                 noised_pos=y,
                 t=batched_t,
                 feats=batch,
-                c=c,
             )["predict_velocity"]
-            velocity = velocity_uncond + self.guidance_scale * (
-                velocity_cond - velocity_uncond
-            )
-        else:
-            velocity = velocity_uncond
 
-        score = flow.compute_score_from_velocity(velocity, y, t)
+            score = flow.compute_score_from_velocity(velocity, y, t)
+
+        #* Apply exendiff conditioning:
+        use_exendiff = True
+        if use_exendiff:
+            # S_rest(x_t,t) = s_theta(x_t,t) - 0.5 * k * grad_{x_t} || y_target - A(x0_hat) ||_2^2
+            # for this linear FM path: x0_hat = y_t + (1 - t) * v_theta(y_t, t)
+            target_atom_coords = batch.get("ref_pos") #! introduce reference data + matching atom name
+            with torch.enable_grad():
+                y_for_grad = y.detach().requires_grad_(True)
+
+                batched_t_grad = repeat(t, " -> b", b=y_for_grad.shape[0]).to(y_for_grad)
+
+                velocity_grad = model_fn(
+                    noised_pos=y_for_grad,
+                    t=batched_t_grad,
+                    feats=batch,
+                )["predict_velocity"]
+
+                t_pad = flow.right_pad_dims_to(y_for_grad, batched_t_grad)
+                x0_hat = y_for_grad + (1.0 - t_pad) * velocity_grad
+
+                # center target into the same frame as the model input / x0_hat
+                target_atom_coords = target_atom_coords.to(y_for_grad)
+                target_centered = center_random_augmentation(
+                    target_atom_coords,
+                    atom_pad_mask,
+                    augmentation=False,
+                    centering=True,
+                )
+
+                residual = (target_centered - A_fn(x0_hat)) * atom_pad_mask_3d
+                residual_l2_norm = torch.sum(residual * residual)
+                k = (2/t**2)/residual.abs()
+                conditioning_loss = 0.5 * k * residual_l2_norm
+
+                grad_conditioning = torch.autograd.grad(
+                    conditioning_loss,
+                    y_for_grad,
+                    create_graph=False,
+                    retain_graph=False,
+                    only_inputs=True,
+                )[0]
+
+            score = score - grad_conditioning
+        #* End of exendiff conditioning.
 
         diff_coeff = self.diffusion_coefficient(t)
         drift = velocity + diff_coeff * score
@@ -138,10 +171,7 @@ class EMSampler():
                 t,
                 t_next,
                 feats,
-                model_fn_conditioned=model_fn_conditioned,
-                c=c,
             )
-
         return {
             "denoised_coords": y_sampled
         }

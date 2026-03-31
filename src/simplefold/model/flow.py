@@ -16,6 +16,10 @@ class BasePath:
     def __init__(self):
         return
 
+    def right_pad_dims_to(self, x, t):
+        # Backward-compatible instance API used by sampler implementations.
+        return right_pad_dims_to(x, t)
+
     def compute_alpha_t(self, t):
         """Compute the data coefficient along the path"""
         return None, None
