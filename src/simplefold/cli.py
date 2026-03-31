@@ -29,6 +29,25 @@ def main():
     parser.add_argument("--backend", type=str, default='torch', choices=['torch', 'mlx'], help="Backend to run inference either torch or mlx")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument(
+        "--target_conditioning_npz",
+        type=str,
+        default=None,
+        help=(
+            "Optional NPZ path with target atom coordinates and atom names "
+            "for external conditioning. Expected keys include "
+            "`target_atom_coords` (or `xyz`/`trajectory`) and `atom_names`."
+        ),
+    )
+    parser.add_argument(
+        "--target_frame_idx",
+        type=int,
+        default=0,
+        help=(
+            "Frame index to use when the target coordinates key has shape "
+            "(num_frames, num_atoms, 3)."
+        ),
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}"

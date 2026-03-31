@@ -88,11 +88,11 @@ class EMSampler():
             score = flow.compute_score_from_velocity(velocity, y, t)
 
         #* Apply exendiff conditioning:
-        use_exendiff = True
+        target_atom_coords = batch.get("target_atom_coords_aligned")
+        use_exendiff = True #True and (target_atom_coords is not None)
         if use_exendiff:
             # S_rest(x_t,t) = s_theta(x_t,t) - 0.5 * k * grad_{x_t} || y_target - A(x0_hat) ||_2^2
             # for this linear FM path: x0_hat = y_t + (1 - t) * v_theta(y_t, t)
-            target_atom_coords = batch.get("ref_pos") #! introduce reference data + matching atom name
             with torch.enable_grad():
                 y_for_grad = y.detach().requires_grad_(True)
 
@@ -105,7 +105,7 @@ class EMSampler():
                 )["predict_velocity"]
 
                 t_pad = flow.right_pad_dims_to(y_for_grad, batched_t_grad)
-                x0_hat = y_for_grad + (1.0 - t_pad) * velocity_grad #! this must be checked
+                x0_hat = y_for_grad + (1.0 - t_pad) * velocity_grad
 
                 # center target into the same frame as the model input / x0_hat
                 target_atom_coords = target_atom_coords.to(y_for_grad)
@@ -117,8 +117,9 @@ class EMSampler():
                 )
 
                 residual = (target_centered - A_fn(x0_hat)) * atom_pad_mask_3d
-                residual_l2_norm = torch.sum(residual * residual)
-                k = (2/t**2)/torch.sum(residual.abs())
+                l1 = torch.norm(score, p=1)
+                k = 50 / l1
+                residual_l2_norm = torch.norm(residual, p=2)
                 conditioning_loss = 0.5 * k * residual_l2_norm
 
                 grad_conditioning = torch.autograd.grad(
@@ -130,6 +131,19 @@ class EMSampler():
                 )[0]
 
             score = score - grad_conditioning
+
+            filepath = "/home/nobilm@usi.ch/ml-simplefold/A2a_via_cli_test_exendiff/log.txt"
+            with open(filepath, "a") as f:
+                f.write(
+                    f"k: {k}, score mean: {score.mean():.3f}, "
+                    f"grad_conditioning mean: {grad_conditioning.mean():.3f}\n"
+                )
+                f.write(
+                    f"k: {k}, score norm: {score.norm():.3f}, "
+                    f"grad_conditioning norm: {grad_conditioning.norm():.3f}\n"
+                )
+
+
         #* End of exendiff conditioning.
 
         diff_coeff = self.diffusion_coefficient(t)

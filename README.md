@@ -255,3 +255,18 @@ out: /storage_common/nobilm/backmapping_pots_model/datasets/inactive/without_hs/
 
 python drop_hs.py --input-npz /storage_common/nobilm/backmapping_pots_model/datasets/pas/with_hs/backmapping_dataset.npz
 out: /storage_common/nobilm/backmapping_pots_model/datasets/pas/without_hs/backmapping_dataset.npz
+
+https://rest.uniprot.org/uniprotkb/P29274.fasta
+
+python /home/nobilm@usi.ch/ml-simplefold/src/simplefold/cli.py \
+  --backend torch \
+  --fasta_path /home/nobilm@usi.ch/ml-simplefold/a2a_nocappings.fasta \
+  --output_dir /home/nobilm@usi.ch/ml-simplefold/A2a_via_cli_test_exendiff \
+  --target_conditioning_npz /storage_common/nobilm/backmapping_pots_model/datasets/active/without_hs/backmapping_dataset.npz \
+  --target_frame_idx 0
+
+python scripts/cif_npz_atomwise_rmsd.py \
+  --cif-path /home/nobilm@usi.ch/ml-simplefold/A2a_via_cli_test_exendiff/predictions_simplefold_100M/a2a_nocappings_sampled_0.cif \
+  --npz-path /storage_common/nobilm/backmapping_pots_model/datasets/active/without_hs/backmapping_dataset.npz \
+  --frame-index 0 \
+  --per-atom-out /home/nobilm@usi.ch/ml-simplefold/A2a_via_cli_test_exendiff/predictions_simplefold_100M/a2a_nocappings_sampled_0_atomwise_rmsd.csv

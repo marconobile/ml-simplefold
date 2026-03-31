@@ -9,6 +9,7 @@ import hydra
 import omegaconf
 import argparse
 import numpy as np
+from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path
 from itertools import starmap
@@ -48,6 +49,280 @@ ckpt_url_dict = {
 }
 
 plddt_ckpt_url = "https://ml-site.cdn-apple.com/models/simplefold/plddt_module_1.6B.ckpt"
+
+
+def _decode_atom_name_code(code_row):
+    # Atom names are stored as (ord(char) - 32) with zero-padding.
+    chars = [chr(int(c) + 32) for c in code_row if int(c) != 0]
+    return "".join(chars).strip().upper()
+
+
+def _normalize_atom_name(name):
+    if isinstance(name, (bytes, np.bytes_)):
+        return name.decode("utf-8").strip().upper()
+    return str(name).strip().upper()
+
+
+def _decode_batch_atom_names(batch):
+    ref_atom_name_chars = batch["ref_atom_name_chars"]
+    atom_pad_mask = batch["atom_pad_mask"]
+
+    # [B, N, 4, 64] -> [B, N, 4] encoded name chars
+    atom_name_codes = torch.argmax(ref_atom_name_chars, dim=-1).detach().cpu().numpy()
+    atom_pad_mask = atom_pad_mask.detach().cpu().numpy() > 0.5
+
+    decoded_per_batch = []
+    for b in range(atom_name_codes.shape[0]):
+        num_valid_atoms = int(atom_pad_mask[b].sum())
+        decoded = [
+            _decode_atom_name_code(atom_name_codes[b, i])
+            for i in range(num_valid_atoms)
+        ]
+        decoded_per_batch.append(decoded)
+    return decoded_per_batch
+
+
+def _decode_batch_atom_residue_indices(batch):
+    atom_to_token_idx = batch["atom_to_token_idx"].long()
+    residue_index = batch["residue_index"].long()
+    atom_pad_mask = batch["atom_pad_mask"].detach().cpu().numpy() > 0.5
+
+    atom_residue_index = torch.gather(residue_index, dim=1, index=atom_to_token_idx)
+    atom_residue_index = atom_residue_index.detach().cpu().numpy()
+
+    decoded_per_batch = []
+    for b in range(atom_residue_index.shape[0]):
+        num_valid_atoms = int(atom_pad_mask[b].sum())
+        decoded_per_batch.append(atom_residue_index[b, :num_valid_atoms])
+    return decoded_per_batch
+
+
+def _load_target_atom_names(npz_data):
+    name_key_candidates = ("atom_names", "target_atom_names", "names")
+    name_key = None
+    for key in name_key_candidates:
+        if key in npz_data:
+            name_key = key
+            break
+    if name_key is None:
+        raise ValueError(
+            "Target NPZ does not contain atom names. "
+            f"Tried keys: {name_key_candidates}."
+        )
+
+    atom_names = npz_data[name_key]
+    if atom_names.ndim == 2 and atom_names.shape[-1] == 4 and np.issubdtype(atom_names.dtype, np.integer):
+        # Handle names encoded as 4 integer chars (SimpleFold structure format).
+        decoded = [_decode_atom_name_code(row) for row in atom_names]
+        return np.asarray(decoded, dtype=np.str_), name_key
+
+    if atom_names.ndim != 1:
+        raise ValueError(
+            f"Target atom names must be 1D (or Nx4 int-encoded), got shape {atom_names.shape}."
+        )
+
+    decoded = np.asarray([_normalize_atom_name(name) for name in atom_names], dtype=np.str_)
+    return decoded, name_key
+
+
+def _load_target_atom_residue_index(npz_data):
+    residue_key_candidates = ("atom_residue_index", "atom_resids")
+    residue_key = None
+    for key in residue_key_candidates:
+        if key in npz_data:
+            residue_key = key
+            break
+    if residue_key is None:
+        return None, None
+
+    atom_residue_index = np.asarray(npz_data[residue_key], dtype=np.int64)
+    if atom_residue_index.ndim != 1:
+        raise ValueError(
+            f"Target atom residue indices must be 1D, got shape {atom_residue_index.shape}."
+        )
+    return atom_residue_index, residue_key
+
+
+def _load_target_coords(npz_data, target_frame_idx):
+    coord_key = "trajectory"
+    target_atom_coords = np.asarray(npz_data[coord_key], dtype=np.float32)
+    if target_atom_coords.ndim == 3:
+        if target_frame_idx < 0 or target_frame_idx >= target_atom_coords.shape[0]:
+            raise ValueError(
+                f"target_frame_idx={target_frame_idx} is out of bounds for "
+                f"coordinates with shape {target_atom_coords.shape}."
+            )
+        target_atom_coords = target_atom_coords[target_frame_idx]
+    elif target_atom_coords.ndim != 2:
+        raise ValueError(
+            f"Target atom coordinates must be shape (N, 3) or (T, N, 3), got {target_atom_coords.shape}."
+        )
+
+    if target_atom_coords.shape[-1] != 3:
+        raise ValueError(
+            f"Expected target atom coordinates to have last dimension 3, got shape {target_atom_coords.shape}."
+        )
+    return target_atom_coords, coord_key
+
+
+def _build_index_mapping(input_keys, target_keys, key_label):
+    if len(input_keys) != len(target_keys):
+        raise ValueError(
+            f"Atom count mismatch between input protein and target NPZ: "
+            f"{len(input_keys)} vs {len(target_keys)}."
+        )
+
+    input_idx_by_key = defaultdict(list)
+    target_idx_by_key = defaultdict(list)
+    for idx, key in enumerate(input_keys):
+        input_idx_by_key[key].append(idx)
+    for idx, key in enumerate(target_keys):
+        target_idx_by_key[key].append(idx)
+
+    all_keys = set(input_idx_by_key.keys()) | set(target_idx_by_key.keys())
+    mismatched_counts = []
+    for key in all_keys:
+        n_input = len(input_idx_by_key.get(key, []))
+        n_target = len(target_idx_by_key.get(key, []))
+        if n_input != n_target:
+            mismatched_counts.append((key, n_input, n_target))
+
+    if mismatched_counts:
+        mismatch_details = ", ".join(
+            f"{key}: input={n_input}, target={n_target}"
+            for key, n_input, n_target in mismatched_counts[:12]
+        )
+        raise ValueError(
+            f"{key_label} multiplicities do not match between input and target NPZ. "
+            f"Examples: {mismatch_details}."
+        )
+
+    target_index_for_input_index = np.empty(len(input_keys), dtype=np.int64)
+    for key, input_indices in input_idx_by_key.items():
+        target_indices = target_idx_by_key[key]
+        # Deterministic 1:1 assignment by occurrence order within each key.
+        for occurrence_idx, input_index in enumerate(input_indices):
+            target_index_for_input_index[input_index] = target_indices[occurrence_idx]
+
+    return target_index_for_input_index
+
+
+def _build_atom_name_mapping(input_atom_names, target_atom_names):
+    return _build_index_mapping(
+        input_keys=input_atom_names,
+        target_keys=target_atom_names,
+        key_label="Atom-name",
+    )
+
+
+def _build_atom_residue_name_mapping(
+    input_atom_names,
+    target_atom_names,
+    input_atom_residue_index,
+    target_atom_residue_index,
+):
+    input_keys = list(zip(input_atom_residue_index.tolist(), input_atom_names))
+    target_keys = list(zip(target_atom_residue_index.tolist(), target_atom_names))
+    return _build_index_mapping(
+        input_keys=input_keys,
+        target_keys=target_keys,
+        key_label="(residue_index, atom_name)",
+    )
+
+
+def load_external_conditioning_npz(path, target_frame_idx):
+    npz_path = Path(path)
+    if not npz_path.exists():
+        raise FileNotFoundError(f"Target conditioning NPZ not found: {npz_path}")
+
+    with np.load(npz_path, allow_pickle=False) as npz_data:
+        target_atom_coords, coords_key = _load_target_coords(npz_data, target_frame_idx)
+        target_atom_names, names_key = _load_target_atom_names(npz_data)
+        target_atom_residue_index, residue_key = _load_target_atom_residue_index(npz_data)
+
+    if target_atom_coords.shape[0] != target_atom_names.shape[0]:
+        raise ValueError(
+            "Target NPZ has inconsistent sizes between coordinates and atom names: "
+            f"{target_atom_coords.shape[0]} vs {target_atom_names.shape[0]}."
+        )
+    if target_atom_residue_index is not None and target_atom_residue_index.shape[0] != target_atom_names.shape[0]:
+        raise ValueError(
+            "Target NPZ has inconsistent sizes between atom_names and atom_residue_index: "
+            f"{target_atom_names.shape[0]} vs {target_atom_residue_index.shape[0]}."
+        )
+
+    print(
+        "Loaded target conditioning NPZ: "
+        f"path={npz_path}, coords_key={coords_key}, names_key={names_key}, "
+        f"residue_key={residue_key}, num_atoms={target_atom_coords.shape[0]}."
+    )
+
+    return {
+        "target_atom_coords": target_atom_coords,
+        "target_atom_names": target_atom_names,
+        "target_atom_residue_index": target_atom_residue_index,
+        "path": str(npz_path),
+        "coords_key": coords_key,
+        "names_key": names_key,
+        "residue_key": residue_key,
+    }
+
+
+def attach_aligned_target_to_batch(batch, target_data, coord_scale):
+    decoded_atom_names = _decode_batch_atom_names(batch)
+    if len(decoded_atom_names) == 0:
+        raise ValueError("Batch does not contain atoms.")
+
+    target_atom_coords = target_data["target_atom_coords"]
+    target_atom_names = target_data["target_atom_names"]
+    target_atom_residue_index = target_data.get("target_atom_residue_index")
+    decoded_atom_residue_indices = (
+        _decode_batch_atom_residue_indices(batch)
+        if target_atom_residue_index is not None
+        else None
+    )
+
+    B, N, _ = batch["coords"].shape
+    aligned_target = torch.zeros(
+        (B, N, 3),
+        dtype=batch["coords"].dtype,
+        device=batch["coords"].device,
+    )
+
+    for b in range(B):
+        input_atom_names = decoded_atom_names[b]
+        if decoded_atom_residue_indices is not None:
+            input_atom_residue_index = decoded_atom_residue_indices[b]
+            try:
+                mapping = _build_atom_residue_name_mapping(
+                    input_atom_names=input_atom_names,
+                    target_atom_names=target_atom_names,
+                    input_atom_residue_index=input_atom_residue_index,
+                    target_atom_residue_index=target_atom_residue_index,
+                )
+            except ValueError:
+                # Common case: target residue indices can be 1-based.
+                if np.min(target_atom_residue_index) < 1:
+                    raise
+                shifted_target_residue_index = target_atom_residue_index - 1
+                mapping = _build_atom_residue_name_mapping(
+                    input_atom_names=input_atom_names,
+                    target_atom_names=target_atom_names,
+                    input_atom_residue_index=input_atom_residue_index,
+                    target_atom_residue_index=shifted_target_residue_index,
+                )
+        else:
+            mapping = _build_atom_name_mapping(input_atom_names, target_atom_names)
+
+        mapped_target_coords = target_atom_coords[mapping] / float(coord_scale)
+        aligned_target[b, : len(input_atom_names)] = torch.as_tensor(
+            mapped_target_coords,
+            dtype=batch["coords"].dtype,
+            device=batch["coords"].device,
+        )
+
+    batch["target_atom_coords_aligned"] = aligned_target
+    return batch
 
 
 def get_config_path(relative_path):
@@ -293,6 +568,19 @@ def predict_structures_from_fastas(args):
         args.backend = "torch"
         print("MLX not available, switch to torch backend.")
 
+    if args.target_conditioning_npz is not None and args.backend != "torch":
+        raise ValueError(
+            "External target conditioning NPZ is currently supported only with "
+            "the torch backend."
+        )
+
+    target_conditioning_data = None
+    if args.target_conditioning_npz is not None:
+        target_conditioning_data = load_external_conditioning_npz(
+            args.target_conditioning_npz,
+            target_frame_idx=args.target_frame_idx,
+        )
+
     # initialize models
     model, device = initialize_folding_model(args)
     plddt_latent_module, plddt_out_module = initialize_plddt_module(args, device)
@@ -322,6 +610,18 @@ def predict_structures_from_fastas(args):
             tokenizer, featurizer, processor,
             esm_model, esm_dict, af2_to_esm,
         )
+
+        if target_conditioning_data is not None:
+            try:
+                batch = attach_aligned_target_to_batch(
+                    batch,
+                    target_conditioning_data,
+                    coord_scale=processor.scale,
+                )
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to align target conditioning NPZ to structure `{record.id}`: {e}"
+                ) from e
 
         sampled_coord, pad_mask, plddts = generate_structure(
             args, batch, sampler, flow, processor,
