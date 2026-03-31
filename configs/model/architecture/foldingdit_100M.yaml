@@ -31,7 +31,7 @@ pos_embedder:
 trunk:
   _target_: model.torch.blocks.HomogenTrunk
   depth: 8
-  block: 
+  block: # self.blocks = nn.ModuleList([block() for _ in range(depth)]) at blocks.py (line 119)
     _target_: model.torch.blocks.DiTBlock
     _partial_: True # because in the for loop we create a new module
     hidden_size: 768
@@ -56,7 +56,7 @@ atom_n_keys_enc: 128
 atom_encoder_transformer:
   _target_: model.torch.blocks.HomogenTrunk
   depth: 1
-  block: 
+  block:
     _target_: model.torch.blocks.DiTBlock
     _partial_: True # because in the for loop we create a new module
     hidden_size: 256
@@ -81,7 +81,7 @@ atom_n_keys_dec: 128
 atom_decoder_transformer:
   _target_: model.torch.blocks.HomogenTrunk
   depth: 1
-  block: 
+  block:
     _target_: model.torch.blocks.DiTBlock
     _partial_: True # because in the for loop we create a new module
     hidden_size: 256

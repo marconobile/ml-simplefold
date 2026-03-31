@@ -101,6 +101,25 @@ class Resource:
         return out
 
 
+def validate_ccd_resource(resource: Resource, host: str, port: int) -> None:
+    """Validate that Redis has the CCD entries required for parsing."""
+    required_keys = ("ALA", "SER", "GLY")
+    missing = [key for key in required_keys if resource.get(key) is None]
+    if not missing:
+        return
+
+    missing_str = ", ".join(missing)
+    msg = (
+        f"Redis at {host}:{port} does not contain CCD entries (missing keys: {missing_str}). "
+        "This usually means Redis started in the wrong directory and did not load ccd.rdb.\n"
+        "Start Redis with:\n"
+        "  redis-server --dir /path/to/ccd_dir --dbfilename ccd.rdb --port 7777\n"
+        "Then verify it is loaded:\n"
+        "  redis-cli -p 7777 DBSIZE"
+    )
+    raise SystemExit(msg)
+
+
 def fetch(data_dir: Path, max_file_size: Optional[int] = None) -> list[PDBFile]:
     """Fetch the PDB files."""
     data: list[PDBFile] = []
@@ -261,6 +280,7 @@ def process(args) -> None:
 
     # Load shared data from redis
     resource = Resource(host=args.redis_host, port=args.redis_port)
+    validate_ccd_resource(resource, args.redis_host, args.redis_port)
 
     # Get data points
     print("Fetching data...")
