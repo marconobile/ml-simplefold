@@ -3,6 +3,7 @@
 # Copyright (c) 2025 Apple Inc. Licensed under MIT License.
 #
 
+from pathlib import Path
 import torch
 from tqdm import tqdm
 from einops import repeat
@@ -42,6 +43,25 @@ class EMSampler():
         else:
             self.steps = torch.linspace(
                 self.t_start, 1.0, steps=self.num_timesteps + 1
+            )
+
+    def _log_exendiff(self, t, score_og, score_new, grad_conditioning_og, grad_conditioning_new, scale):
+
+        log_path = Path("/home/nobilm@usi.ch/ml-simplefold/log_score.txt")
+
+        score_og_norm = torch.norm(score_og, p=2).item()
+        score_new_norm = torch.norm(score_new, p=2).item()
+        grad_conditioning_og_norm = torch.norm(grad_conditioning_og, p=2).item()
+        grad_conditioning_new_norm = torch.norm(grad_conditioning_new, p=2).item()
+
+        with log_path.open("a") as f:
+            f.write(
+                f"t: {t:.6f}, "
+                f"score_og norm: {score_og_norm:.6f}, "
+                f"score_new norm: {score_new_norm:.6f}, "
+                f"grad_conditioning_og norm: {grad_conditioning_og_norm:.6f}, "
+                f"grad_conditioning_new norm: {grad_conditioning_new_norm:.6f}, "
+                f"scale: {scale:.8f}\n"
             )
 
     def diffusion_coefficient(self, t, eps=0.01):
@@ -118,9 +138,9 @@ class EMSampler():
 
                 residual = (target_centered - A_fn(x0_hat)) * atom_pad_mask_3d
                 l1 = torch.norm(score, p=1)
-                k = 50 / l1
+                k = 5/l1
                 residual_l2_norm = torch.norm(residual, p=2)
-                conditioning_loss = 0.5 * k * residual_l2_norm
+                conditioning_loss = 0.5 * residual_l2_norm
 
                 grad_conditioning = torch.autograd.grad(
                     conditioning_loss,
@@ -130,18 +150,16 @@ class EMSampler():
                     only_inputs=True,
                 )[0]
 
-            score = score - grad_conditioning
+            grad_conditioning_og = grad_conditioning.clone()
+            score_og = score.clone()
 
-            filepath = "/home/nobilm@usi.ch/ml-simplefold/A2a_via_cli_test_exendiff/log.txt"
-            with open(filepath, "a") as f:
-                f.write(
-                    f"k: {k}, score mean: {score.mean():.3f}, "
-                    f"grad_conditioning mean: {grad_conditioning.mean():.3f}\n"
-                )
-                f.write(
-                    f"k: {k}, score norm: {score.norm():.3f}, "
-                    f"grad_conditioning norm: {grad_conditioning.norm():.3f}\n"
-                )
+            scale = score.norm() / (grad_conditioning.norm() + 1e-8)
+
+            grad_conditioning = grad_conditioning * scale
+            score = score - grad_conditioning
+            self._log_exendiff(t, score_og, score, grad_conditioning_og, grad_conditioning, scale)
+
+            # t, score_og, score_new, grad_conditioning_og, grad_conditioning_new, scale):
 
 
         #* End of exendiff conditioning.
