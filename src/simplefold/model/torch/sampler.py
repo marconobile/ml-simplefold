@@ -156,7 +156,7 @@ class EMSampler():
             scale = score.norm() / (grad_conditioning.norm() + 1e-8)
 
             grad_conditioning = grad_conditioning * scale
-            score = score - grad_conditioning
+            score = score - 2 * grad_conditioning
             self._log_exendiff(t, score_og, score, grad_conditioning_og, grad_conditioning, scale)
 
             # t, score_og, score_new, grad_conditioning_og, grad_conditioning_new, scale):
