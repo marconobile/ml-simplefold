@@ -3,7 +3,7 @@
 *.egg-info
 artifacts/
 data/
-A2a_via_cli/
+samplings/
 *.yaml
 *.log
 *.json
