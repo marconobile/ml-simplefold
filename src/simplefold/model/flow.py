@@ -66,6 +66,7 @@ class BasePath:
         return -drift_mean, drift_var
 
     def compute_score_from_velocity(self, v_t, y_t, t):
+        '''https://chatgpt.com/share/e/69ce35fb-bcfc-8012-929b-3b749e9c666c'''
         t = right_pad_dims_to(y_t, t)
         alpha_t, d_alpha_t = self.compute_alpha_t(t)
         sigma_t, d_sigma_t = self.compute_sigma_t(t)

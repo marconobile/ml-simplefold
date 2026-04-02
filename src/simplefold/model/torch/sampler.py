@@ -125,7 +125,7 @@ class EMSampler():
                 )["predict_velocity"]
 
                 t_pad = flow.right_pad_dims_to(y_for_grad, batched_t_grad)
-                x0_hat = y_for_grad + (1.0 - t_pad) * velocity_grad
+                x0_hat = y_for_grad + (1.0 - t_pad) * velocity_grad # https://gemini.google.com/app/6502a4a95573ee29
 
                 # center target into the same frame as the model input / x0_hat
                 target_atom_coords = target_atom_coords.to(y_for_grad)
