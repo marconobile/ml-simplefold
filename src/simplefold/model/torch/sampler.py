@@ -123,7 +123,7 @@ class EMSampler():
                 self.t_start, 1.0, steps=self.num_timesteps + 1
             )
 
-    def _log_exendiff(self, t, score_og, score_new, grad_conditioning_og, grad_conditioning_new, scale):
+    def _log_exendiff(self, t, score_og, score_new, grad_conditioning_og, grad_conditioning_new, scale, kwargs):
 
         log_path = Path("/home/nobilm@usi.ch/ml-simplefold/log_score.txt")
 
@@ -139,7 +139,8 @@ class EMSampler():
                 f"score_new norm: {score_new_norm:.6f}, "
                 f"grad_conditioning_og norm: {grad_conditioning_og_norm:.6f}, "
                 f"grad_conditioning_new norm: {grad_conditioning_new_norm:.6f}, "
-                f"scale: {scale:.8f}\n"
+                f"scale: {scale:.8f}\n",
+                # ", ".join(f"{k}: {v}" for k, v in kwargs.items()) + "\n"
             )
 
     def diffusion_coefficient(self, t, eps=0.01):
@@ -260,11 +261,8 @@ class EMSampler():
 
                     # conditioning_loss = 0.5 * torch.mean((torch.nan_to_num(target_dihedrals) - pred_for_loss) ** 2)
                     # conditioning_loss =  torch.norm((torch.nan_to_num(target_dihedrals) - torch.nan_to_num(pred_for_loss))**2, p=2)
-
-
                     # conditioning_loss =  torch.norm(torch.nan_to_num(target_dihedrals) - torch.nan_to_num(pred_for_loss), p=2)**2
                     conditioning_loss =  torch.norm(torch.cos(torch.nan_to_num(target_dihedrals)) - torch.cos(torch.nan_to_num(pred_for_loss)), p=2)**2
-                    print((target_dihedrals.nan_to_num()-pred_dihedrals.nan_to_num()).sum())
 
                 if use_coords_conditioning:
                     residual_l2_norm = torch.norm(residual, p=2)**2
@@ -280,12 +278,13 @@ class EMSampler():
 
             grad_conditioning_og = grad_conditioning.clone()
             score_og = score.clone()
-
             scale = score.norm() / (grad_conditioning.norm() + 1e-8)
 
             grad_conditioning = grad_conditioning * scale
-            score = score -  grad_conditioning # 4 is too much
-            self._log_exendiff(t, score_og, score, grad_conditioning_og, grad_conditioning, scale)
+            score = score - 1.5 * grad_conditioning # 4 is too much
+            # score = score - grad_conditioning # 4 is too much
+
+            self._log_exendiff(t, score_og, score, grad_conditioning_og, grad_conditioning, scale, {"conditioning_loss": (target_dihedrals.nan_to_num()-pred_dihedrals.nan_to_num()).sum().item()})
 
         #* End of exendiff conditioning.
 
