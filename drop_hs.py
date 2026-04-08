@@ -12,11 +12,18 @@ the NPZ internally consistent.
 from __future__ import annotations
 
 import argparse
+import sys
 import zipfile
 from pathlib import Path
 
 import numpy as np
 from numpy.lib import format as npy_format
+
+
+REPO_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from simplefold.utils.dihedral_index_utils import remap_dihedral_atom_indices_after_atom_filter
 
 
 DEFAULT_INPUT = Path(
@@ -159,6 +166,30 @@ def main() -> None:
         keep_mask, h_mask = build_atom_mask(atom_names)
         keep_indices = np.flatnonzero(keep_mask)
         dropped = int(h_mask.sum())
+        remapped_dihedral_atom_indices = None
+        remapped_dihedral_mask = None
+        dropped_active_dihedrals = 0
+
+        has_dihedral_indices = "dihedral_atom_indices" in data
+        has_dihedral_mask = "dihedral_mask" in data
+        if has_dihedral_indices != has_dihedral_mask:
+            raise ValueError(
+                "Expected `dihedral_atom_indices` and `dihedral_mask` to be present together."
+            )
+        if has_dihedral_indices:
+            remapped_dihedral_atom_indices, remapped_dihedral_mask = (
+                remap_dihedral_atom_indices_after_atom_filter(
+                    dihedral_atom_indices=data["dihedral_atom_indices"],
+                    keep_indices=keep_indices,
+                    original_num_atoms=atom_count,
+                    dihedral_mask=data["dihedral_mask"],
+                    context="Input NPZ",
+                )
+            )
+            dropped_active_dihedrals = int(
+                np.asarray(data["dihedral_mask"], dtype=bool).sum()
+                - remapped_dihedral_mask.sum()
+            )
 
         changed: list[tuple[str, int, tuple[int, ...], tuple[int, ...]]] = []
         output_shapes: dict[str, tuple[int, ...]] = {}
@@ -177,16 +208,23 @@ def main() -> None:
                 allowZip64=True,
             ) as zf:
                 for key in keys:
-                    array = data[key]
-                    filtered, atom_axis = filter_atom_axis(
-                        array=array,
-                        key=key,
-                        atom_count=atom_count,
-                        keep_indices=keep_indices,
-                    )
+                    if key == "dihedral_atom_indices" and remapped_dihedral_atom_indices is not None:
+                        filtered = remapped_dihedral_atom_indices
+                        atom_axis = None
+                    elif key == "dihedral_mask" and remapped_dihedral_mask is not None:
+                        filtered = remapped_dihedral_mask
+                        atom_axis = None
+                    else:
+                        array = data[key]
+                        filtered, atom_axis = filter_atom_axis(
+                            array=array,
+                            key=key,
+                            atom_count=atom_count,
+                            keep_indices=keep_indices,
+                        )
                     output_shapes[key] = filtered.shape
                     if atom_axis is not None:
-                        changed.append((key, atom_axis, array.shape, filtered.shape))
+                        changed.append((key, atom_axis, data[key].shape, filtered.shape))
 
                     with zf.open(f"{key}.npy", mode="w", force_zip64=True) as fh:
                         npy_format.write_array(fh, filtered, allow_pickle=False)
@@ -215,6 +253,11 @@ def main() -> None:
     print(f"Input:   {input_npz}")
     print(f"Output:  {output_npz}")
     print(f"Atoms:   {atom_count} -> {keep_indices.shape[0]} (dropped {dropped} hydrogens)")
+    if remapped_dihedral_atom_indices is not None:
+        print(
+            "Dihedrals: remapped `dihedral_atom_indices` to filtered atom numbering; "
+            f"masked out {dropped_active_dihedrals} active dihedrals that referenced removed atoms."
+        )
     print("Filtered keys (axis old_shape -> new_shape):")
     for key, axis, old_shape, new_shape in changed:
         print(f"  {key} (axis {axis}) {old_shape} -> {new_shape}")

@@ -23,6 +23,10 @@ from processor.protein_processor import ProteinDataProcessor
 from utils.datamodule_utils import process_one_inference_structure
 from utils.esm_utils import _af2_to_esm, esm_registry
 from utils.boltz_utils import process_structure, save_structure
+from utils.dihedral_index_utils import (
+    normalize_dihedral_atom_indices,
+    remap_dihedral_atom_indices_to_input,
+)
 from utils.fasta_utils import process_fastas, download_fasta_utilities, check_fasta_inputs
 from boltz_data_pipeline.feature.featurizer import BoltzFeaturizer
 from boltz_data_pipeline.tokenize.boltz_protein import BoltzTokenizer
@@ -165,6 +169,67 @@ def _load_target_coords(npz_data, target_frame_idx):
     return target_atom_coords, coord_key
 
 
+def _load_target_dihedrals(npz_data, _target_frame_idx):
+    dihedral_key_candidates = ("dihedrals", "target_dihedrals")
+    dihedral_key = None
+    for key in dihedral_key_candidates:
+        if key in npz_data:
+            dihedral_key = key
+            break
+    if dihedral_key is None:
+        return None, None
+
+    target_dihedrals = np.asarray(npz_data[dihedral_key], dtype=np.float32)
+    if target_dihedrals.ndim not in (2, 3):
+        raise ValueError(
+            f"Target dihedrals must be shape (R, D) or (T, R, D), got {target_dihedrals.shape}."
+        )
+
+    if target_dihedrals.shape[-1] != 5:
+        raise ValueError(
+            f"Expected target dihedrals to have last dimension 5, got shape {target_dihedrals.shape}."
+        )
+    # (frames, residues, values of the 5 dihedrals: ['phi', 'psi', 'omega', 'chi1', 'chi2'])
+    return target_dihedrals[_target_frame_idx], dihedral_key
+
+
+def _load_target_dihedral_atom_indices(npz_data):
+    index_key_candidates = ("dihedral_atom_indices", "target_dihedral_atom_indices")
+    index_key = None
+    for key in index_key_candidates:
+        if key in npz_data:
+            index_key = key
+            break
+    if index_key is None:
+        return None, None
+
+    target_dihedral_atom_indices = np.asarray(npz_data[index_key], dtype=np.int64)
+    if target_dihedral_atom_indices.ndim != 3 or target_dihedral_atom_indices.shape[-1] != 4:
+        raise ValueError(
+            "Target dihedral atom indices must have shape (R, D, 4), "
+            f"got {target_dihedral_atom_indices.shape}."
+        )
+    return target_dihedral_atom_indices, index_key
+
+
+def _load_target_dihedral_mask(npz_data):
+    mask_key_candidates = ("dihedral_mask", "target_dihedral_mask")
+    mask_key = None
+    for key in mask_key_candidates:
+        if key in npz_data:
+            mask_key = key
+            break
+    if mask_key is None:
+        return None, None
+
+    target_dihedral_mask = np.asarray(npz_data[mask_key]).astype(bool)
+    if target_dihedral_mask.ndim != 2:
+        raise ValueError(
+            f"Target dihedral mask must have shape (R, D), got {target_dihedral_mask.shape}."
+        )
+    return target_dihedral_mask, mask_key
+
+
 def _build_index_mapping(input_keys, target_keys, key_label):
     if len(input_keys) != len(target_keys):
         raise ValueError(
@@ -239,6 +304,9 @@ def load_external_conditioning_npz(path, target_frame_idx):
         target_atom_coords, coords_key = _load_target_coords(npz_data, target_frame_idx)
         target_atom_names, names_key = _load_target_atom_names(npz_data)
         target_atom_residue_index, residue_key = _load_target_atom_residue_index(npz_data)
+        target_dihedrals, dihedrals_key = _load_target_dihedrals(npz_data, target_frame_idx)
+        target_dihedral_atom_indices, dihedral_atom_indices_key = _load_target_dihedral_atom_indices(npz_data)
+        target_dihedral_mask, dihedral_mask_key = _load_target_dihedral_mask(npz_data)
 
     if target_atom_coords.shape[0] != target_atom_names.shape[0]:
         raise ValueError(
@@ -250,21 +318,64 @@ def load_external_conditioning_npz(path, target_frame_idx):
             "Target NPZ has inconsistent sizes between atom_names and atom_residue_index: "
             f"{target_atom_names.shape[0]} vs {target_atom_residue_index.shape[0]}."
         )
+    dihedral_fields_present = [
+        target_dihedrals is not None,
+        target_dihedral_atom_indices is not None,
+        target_dihedral_mask is not None,
+    ]
+    if any(dihedral_fields_present) and not all(dihedral_fields_present):
+        raise ValueError(
+            "Target NPZ must provide all dihedral fields together: "
+            "`dihedrals`, `dihedral_atom_indices`, and `dihedral_mask`."
+        )
+    if all(dihedral_fields_present):
+        if target_dihedrals.ndim == 2:
+            dihedral_shape = target_dihedrals.shape
+        elif target_dihedrals.ndim == 3:
+            dihedral_shape = target_dihedrals.shape[1:]
+        else:
+            raise ValueError(
+                f"Unexpected target dihedrals shape {target_dihedrals.shape}."
+            )
+        if dihedral_shape != target_dihedral_mask.shape:
+            raise ValueError(
+                "Target NPZ has inconsistent shapes between dihedrals and dihedral_mask: "
+                f"{target_dihedrals.shape} vs {target_dihedral_mask.shape}."
+            )
+        if target_dihedral_atom_indices.shape[:2] != dihedral_shape:
+            raise ValueError(
+                "Target NPZ has inconsistent shapes between dihedrals and dihedral_atom_indices: "
+                f"{target_dihedrals.shape} vs {target_dihedral_atom_indices.shape}."
+            )
+        target_dihedral_atom_indices = normalize_dihedral_atom_indices(
+            target_dihedral_atom_indices,
+            num_atoms=target_atom_coords.shape[0],
+            dihedral_mask=target_dihedral_mask,
+            context="Target NPZ",
+        )
 
     print(
         "Loaded target conditioning NPZ: "
         f"path={npz_path}, coords_key={coords_key}, names_key={names_key}, "
-        f"residue_key={residue_key}, num_atoms={target_atom_coords.shape[0]}."
+        f"residue_key={residue_key}, dihedrals_key={dihedrals_key}, "
+        f"dihedral_atom_indices_key={dihedral_atom_indices_key}, dihedral_mask_key={dihedral_mask_key}, "
+        f"num_atoms={target_atom_coords.shape[0]}."
     )
 
     return {
         "target_atom_coords": target_atom_coords,
         "target_atom_names": target_atom_names,
         "target_atom_residue_index": target_atom_residue_index,
+        "dihedrals": target_dihedrals,
+        "dihedral_atom_indices": target_dihedral_atom_indices,
+        "dihedral_mask": target_dihedral_mask,
         "path": str(npz_path),
         "coords_key": coords_key,
         "names_key": names_key,
         "residue_key": residue_key,
+        "dihedrals_key": dihedrals_key,
+        "dihedral_atom_indices_key": dihedral_atom_indices_key,
+        "dihedral_mask_key": dihedral_mask_key,
     }
 
 
@@ -276,6 +387,9 @@ def attach_aligned_target_to_batch(batch, target_data, coord_scale):
     target_atom_coords = target_data["target_atom_coords"]
     target_atom_names = target_data["target_atom_names"]
     target_atom_residue_index = target_data.get("target_atom_residue_index")
+    target_dihedrals = target_data.get("dihedrals")
+    target_dihedral_atom_indices = target_data.get("dihedral_atom_indices")
+    target_dihedral_mask = target_data.get("dihedral_mask")
     decoded_atom_residue_indices = (
         _decode_batch_atom_residue_indices(batch)
         if target_atom_residue_index is not None
@@ -288,7 +402,55 @@ def attach_aligned_target_to_batch(batch, target_data, coord_scale):
         dtype=batch["coords"].dtype,
         device=batch["coords"].device,
     )
+    has_dihedral_data = (
+        target_dihedrals is not None
+        and target_dihedral_atom_indices is not None
+        and target_dihedral_mask is not None
+    )
+    if has_dihedral_data:
+        target_dihedrals_tensor = torch.as_tensor(
+            target_dihedrals,
+            dtype=batch["coords"].dtype,
+            device=batch["coords"].device,
+        )
+        if target_dihedrals_tensor.ndim == 2:
+            aligned_dihedrals = target_dihedrals_tensor.unsqueeze(0).expand(B, -1, -1).clone()
+        elif target_dihedrals_tensor.ndim == 3:
+            aligned_dihedrals = target_dihedrals_tensor.unsqueeze(0).expand(B, -1, -1, -1).clone()
+        else:
+            raise ValueError(
+                f"Target dihedrals must be 2D or 3D, got shape {tuple(target_dihedrals_tensor.shape)}."
+            )
+        R, D, num_dihedral_atoms = target_dihedral_atom_indices.shape
+        if num_dihedral_atoms != 4:
+            raise ValueError(
+                f"Target dihedral atom indices must have last dimension 4, got shape {tuple(target_dihedral_atom_indices.shape)}."
+            )
+        expected_dihedral_atom_index_shape = (R, D, num_dihedral_atoms)
+        aligned_dihedral_atom_indices = torch.full(
+            (B, R, D, num_dihedral_atoms),
+            fill_value=-1,
+            dtype=torch.long,
+            device=batch["coords"].device,
+        )
+        target_dihedral_mask_tensor = torch.as_tensor(
+            target_dihedral_mask,
+            dtype=torch.bool,
+            device=batch["coords"].device,
+        )
+        aligned_dihedral_mask = (
+            target_dihedral_mask_tensor.unsqueeze(0).expand(B, -1, -1).clone()
+        )
 
+    # Align target atom coordinates to the input batch atoms across all batch elements.
+    # For each batch index:
+    #   - Extract the input atom names for the current batch element.
+    #   - If residue indices are present, attempt to build a mapping from (atom name, residue index)
+    #     pairs between the input and target. This is stricter and accounts for homonymous atoms
+    #     in different residues.
+    #   - If the mapping fails, a common reason is that the target residue indices are 1-based
+    #     while the input indices are 0-based. In that case, shift the target indices and try again.
+    #   - If no residue indices are available, build a mapping only by atom names.
     for b in range(B):
         input_atom_names = decoded_atom_names[b]
         if decoded_atom_residue_indices is not None:
@@ -320,8 +482,30 @@ def attach_aligned_target_to_batch(batch, target_data, coord_scale):
             dtype=batch["coords"].dtype,
             device=batch["coords"].device,
         )
+        if has_dihedral_data:
+            remapped_dihedral_atom_indices = remap_dihedral_atom_indices_to_input(
+                target_dihedral_atom_indices,
+                target_index_for_input_index=mapping,
+                dihedral_mask=target_dihedral_mask,
+                context="Target NPZ",
+            )
+            if remapped_dihedral_atom_indices.shape != expected_dihedral_atom_index_shape:
+                raise ValueError(
+                    "Remapped dihedral atom indices have unexpected shape: "
+                    f"expected {expected_dihedral_atom_index_shape}, got {remapped_dihedral_atom_indices.shape}."
+                )
+            aligned_dihedral_atom_indices[b] = torch.as_tensor(
+                remapped_dihedral_atom_indices,
+                dtype=torch.long,
+                device=batch["coords"].device,
+            )
+
 
     batch["target_atom_coords_aligned"] = aligned_target
+    if has_dihedral_data:
+        batch["dihedrals"] = aligned_dihedrals
+        batch["dihedral_atom_indices"] = aligned_dihedral_atom_indices
+        batch["dihedral_mask"] = aligned_dihedral_mask
     return batch
 
 
