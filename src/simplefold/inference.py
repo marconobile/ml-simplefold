@@ -680,13 +680,17 @@ def initialize_others(args, device):
     elif args.backend == "mlx":
         sampler_cls = EMSamplerMLX
 
-    sampler = sampler_cls(
+    sampler_kwargs = dict(
         num_timesteps=args.num_steps,
         t_start=1e-4,
         tau=args.tau,
         log_timesteps=True,
         w_cutoff=0.99,
     )
+    if args.backend == "torch":
+        sampler_kwargs["output_dir"] = Path(args.output_dir)
+
+    sampler = sampler_cls(**sampler_kwargs)
     return tokenizer, featurizer, processor, flow, sampler
 
 

@@ -3,7 +3,10 @@
 # Copyright (c) 2025 Apple Inc. Licensed under MIT License.
 #
 
+from datetime import datetime
 from pathlib import Path
+
+import numpy as np
 import torch
 from tqdm import tqdm
 from einops import repeat
@@ -104,6 +107,7 @@ class EMSampler():
         w_cutoff=0.99,
         guidance_scale=1.0,
         conditioning_key="c",
+        output_dir=None,
     ):
         self.num_timesteps = num_timesteps
         self.log_timesteps = log_timesteps
@@ -112,6 +116,14 @@ class EMSampler():
         self.w_cutoff = w_cutoff
         self.guidance_scale = guidance_scale
         self.conditioning_key = conditioning_key
+        self.output_dir = Path(output_dir) if output_dir is not None else None
+        self._dihedral_error_history = []
+        self._dihedral_time_history = []
+        self._dihedral_valid_count_history = []
+        self._dihedral_names = ("phi", "psi", "omega", "chi1", "chi2")
+
+        if self.output_dir is not None:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
 
         if self.log_timesteps:
             t = 1.0 - torch.logspace(-2, 0, self.num_timesteps + 1).flip(0)
@@ -122,6 +134,123 @@ class EMSampler():
             self.steps = torch.linspace(
                 self.t_start, 1.0, steps=self.num_timesteps + 1
             )
+
+    @staticmethod
+    def _mean_abs_wrapped_dihedral_error(pred_dihedrals, target_dihedrals, dihedral_mask):
+        angle_delta = torch.atan2(
+            torch.sin(pred_dihedrals - target_dihedrals),
+            torch.cos(pred_dihedrals - target_dihedrals),
+        ).abs()
+
+        valid_mask = (
+            dihedral_mask
+            & torch.isfinite(target_dihedrals)
+            & torch.isfinite(pred_dihedrals)
+        )
+        valid_mask_float = valid_mask.to(dtype=angle_delta.dtype)
+        masked_angle_delta = torch.where(
+            valid_mask,
+            angle_delta,
+            torch.zeros_like(angle_delta),
+        )
+
+        reduce_dims = tuple(range(angle_delta.ndim - 1))
+        numerator = masked_angle_delta.sum(dim=reduce_dims)
+        denominator = valid_mask_float.sum(dim=reduce_dims)
+        mean_error = numerator / denominator.clamp_min(1.0)
+        mean_error = torch.where(
+            denominator > 0,
+            mean_error,
+            torch.full_like(mean_error, float("nan")),
+        )
+        return mean_error.detach().cpu(), denominator.detach().cpu()
+
+    def _save_dihedral_error_plot(self):
+        if self.output_dir is None or len(self._dihedral_error_history) == 0:
+            return None
+
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib is not available; skipping dihedral error plotting.")
+            return None
+
+        history = torch.stack(self._dihedral_error_history, dim=0).numpy()
+        num_steps, num_dihedrals = history.shape
+        valid_counts = None
+        if len(self._dihedral_valid_count_history) == num_steps:
+            valid_counts = torch.stack(self._dihedral_valid_count_history, dim=0).numpy()
+
+        ncols = min(3, num_dihedrals)
+        nrows = (num_dihedrals + ncols - 1) // ncols
+        fig, axes = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(4.8 * ncols, 3.6 * nrows),
+            sharex=True,
+        )
+        axes = np.atleast_1d(axes).reshape(-1)
+
+        if len(self._dihedral_time_history) == num_steps:
+            step_ids = np.asarray(self._dihedral_time_history, dtype=np.float64)
+        else:
+            step_ids = np.arange(num_steps, dtype=np.float64)
+        for dihedral_idx in range(num_dihedrals):
+            ax = axes[dihedral_idx]
+            y_vals = history[:, dihedral_idx]
+            finite_idx = np.isfinite(y_vals)
+            channel_count = (
+                int(np.nanmax(valid_counts[:, dihedral_idx]))
+                if valid_counts is not None
+                else None
+            )
+            if channel_count is not None:
+                count_suffix = f" (n={channel_count})"
+            else:
+                count_suffix = ""
+            if np.any(finite_idx):
+                ax.plot(step_ids[finite_idx], y_vals[finite_idx], linewidth=1.6)
+            dihedral_name = (
+                self._dihedral_names[dihedral_idx]
+                if dihedral_idx < len(self._dihedral_names)
+                else f"dihedral_{dihedral_idx}"
+            )
+            ax.set_title(f"{dihedral_name}{count_suffix}")
+            if not np.any(finite_idx):
+                ax.text(
+                    0.5,
+                    0.5,
+                    "no valid data",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                )
+            ax.set_xlabel("time t")
+            ax.set_ylabel("error [rad]")
+            ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.35)
+
+        for ax in axes[num_dihedrals:]:
+            ax.set_visible(False)
+
+        fig.suptitle("Per-dihedral absolute wrapped error over diffusion time", fontsize=12)
+        fig.tight_layout()
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        out_path = self.output_dir / f"dihedral_error_over_time_{timestamp}.png"
+        fig.savefig(out_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved dihedral error plot to: {out_path}")
+        if valid_counts is not None:
+            max_counts = np.max(valid_counts, axis=0).astype(int).tolist()
+            print(
+                "Per-dihedral valid counts used for error plotting: "
+                f"phi={max_counts[0]}, psi={max_counts[1]}, omega={max_counts[2]}, "
+                f"chi1={max_counts[3]}, chi2={max_counts[4]}"
+            )
+        return out_path
 
     def _log_exendiff(self, t, score_og, score_new, grad_conditioning_og, grad_conditioning_new, scale, kwargs):
 
@@ -200,9 +329,10 @@ class EMSampler():
             target_dihedrals = batch.get("dihedrals")
             dihedral_atom_indices = batch.get("dihedral_atom_indices")
             dihedral_mask = batch.get("dihedral_mask")
-            target_dihedrals[~dihedral_mask] = float("nan")
 
         use_exendiff = True # keep it like this for now
+        step_dihedral_error = None
+        step_dihedral_valid_count = None
         if use_exendiff:
             # S_rest(x_t,t) = s_theta(x_t,t) - 0.5 * k * grad_{x_t} || y_target - A(x0_hat) ||_2^2
             # for this linear FM path: x0_hat = y_t + (1 - t) * v_theta(y_t, t)
@@ -259,10 +389,23 @@ class EMSampler():
                             f"Unsupported target dihedrals shape: {tuple(target_dihedrals.shape)}."
                         )
 
+                    step_dihedral_error, step_dihedral_valid_count = self._mean_abs_wrapped_dihedral_error(
+                        pred_for_loss,
+                        target_dihedrals,
+                        mask_for_loss,
+                    )
+
                     # conditioning_loss = 0.5 * torch.mean((torch.nan_to_num(target_dihedrals) - pred_for_loss) ** 2)
                     # conditioning_loss =  torch.norm((torch.nan_to_num(target_dihedrals) - torch.nan_to_num(pred_for_loss))**2, p=2)
                     # conditioning_loss =  torch.norm(torch.nan_to_num(target_dihedrals) - torch.nan_to_num(pred_for_loss), p=2)**2
-                    conditioning_loss =  torch.norm(torch.cos(torch.nan_to_num(target_dihedrals)) - torch.cos(torch.nan_to_num(pred_for_loss)), p=2)**2
+                    valid_for_loss = mask_for_loss & torch.isfinite(target_dihedrals)
+                    cos_residual = torch.cos(target_dihedrals) - torch.cos(pred_for_loss)
+                    cos_residual = torch.where(
+                        valid_for_loss,
+                        cos_residual,
+                        torch.zeros_like(cos_residual),
+                    )
+                    conditioning_loss = torch.norm(cos_residual, p=2) ** 2
 
                 if use_coords_conditioning:
                     residual_l2_norm = torch.norm(residual, p=2)**2
@@ -279,9 +422,9 @@ class EMSampler():
             grad_conditioning_og = grad_conditioning.clone()
             score_og = score.clone()
             scale = score.norm() / (grad_conditioning.norm() + 1e-8)
-
+ 
             grad_conditioning = grad_conditioning * scale
-            score = score - 1.5 * grad_conditioning # 4 is too much
+            score = score - 2.5 * grad_conditioning # 4 is too much
             # score = score - grad_conditioning # 4 is too much
 
             self._log_exendiff(t, score_og, score, grad_conditioning_og, grad_conditioning, scale, {"conditioning_loss": (target_dihedrals.nan_to_num()-pred_dihedrals.nan_to_num()).sum().item()})
@@ -292,6 +435,12 @@ class EMSampler():
         drift = velocity + diff_coeff * score
         mean_y = y + drift * dt
         y_sample = mean_y + torch.sqrt(2.0 * dt * diff_coeff * self.tau) * eps
+
+        if step_dihedral_error is not None:
+            self._dihedral_error_history.append(step_dihedral_error)
+            self._dihedral_time_history.append(float(t.detach().cpu().item()))
+            if step_dihedral_valid_count is not None:
+                self._dihedral_valid_count_history.append(step_dihedral_valid_count)
 
         return y_sample
 
@@ -309,6 +458,9 @@ class EMSampler():
         steps = self.steps.to(noise.device)
         y_sampled = noise
         feats = batch
+        self._dihedral_error_history = []
+        self._dihedral_time_history = []
+        self._dihedral_valid_count_history = []
         if c is None and isinstance(feats, dict):
             c = feats.get(self.conditioning_key, None)
 
@@ -328,6 +480,8 @@ class EMSampler():
                 t_next,
                 feats,
             )
+
+        self._save_dihedral_error_plot()
         return {
             "denoised_coords": y_sampled
         }
