@@ -265,4 +265,8 @@ python /home/nobilm@usi.ch/ml-simplefold/src/simplefold/cli.py \
   --target_conditioning_npz /storage_common/nobilm/backmapping_pots_model/datasets/active/without_hs/backmapping_dataset.npz \
   --target_frame_idx 0
 
-python scripts/cif_npz_atomwise_rmsd.py   --cif-path /home/nobilm@usi.ch/ml-simplefold/dbg_output_cos/predictions_simplefold_100M/a2a_nocappings_sampled_0.cif   --npz-path /storage_common/nobilm/backmapping_pots_model/datasets/inactive/whs/without_hs/backmapping_dataset.npz   --frame-index 0   --per-atom-out /home/nobilm@usi.ch/ml-simplefold/dbg_output_cos/predictions_simplefold_100M/a2a_nocappings_sampled_0_atomwise_rmsd.csv
+python scripts/cif_npz_atomwise_rmsd.py  \
+--cif-path /home/nobilm@usi.ch/ml-simplefold/dbg_output_1000/predictions_simplefold_100M/a2a_nocappings_sampled_0.cif \
+--npz-path /storage_common/nobilm/backmapping_pots_model/datasets/inactive/whs/without_hs/backmapping_dataset.npz  \
+--frame-index 0 \
+--per-atom-out /home/nobilm@usi.ch/ml-simplefold/dbg_output_1000/predictions_simplefold_100M/a2a_nocappings_sampled_0_atomwise_rmsd.csv

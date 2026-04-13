@@ -288,6 +288,7 @@ class EMSampler():
         t,
         t_next,
         batch,
+        i,
     ):
         dt = t_next - t
         eps = torch.randn_like(y).to(y)
@@ -316,14 +317,14 @@ class EMSampler():
             score = flow.compute_score_from_velocity(velocity, y, t)
 
         #* Apply exendiff conditioning:
-        use_coords_conditioning = False
+        use_coords_conditioning = True
         use_dihedrals_conditioning = True
         target_atom_coords = None
         target_dihedrals = None
         dihedral_atom_indices = None
         dihedral_mask = None
 
-        if use_coords_conditioning:
+        if i%2==0 and use_coords_conditioning:
             target_atom_coords = batch.get("target_atom_coords_aligned")
         elif use_dihedrals_conditioning:
             target_dihedrals = batch.get("dihedrals")
@@ -350,7 +351,7 @@ class EMSampler():
                 t_pad = flow.right_pad_dims_to(y_for_grad, batched_t_grad)
                 x0_hat = y_for_grad + (1.0 - t_pad) * velocity_grad # https://gemini.google.com/app/6502a4a95573ee29
 
-                if use_coords_conditioning:
+                if i%2==0 and use_coords_conditioning:
                     # center target into the same frame as the model input / x0_hat
                     target_atom_coords = target_atom_coords.to(y_for_grad)
                     target = center_random_augmentation(
@@ -360,6 +361,8 @@ class EMSampler():
                         centering=True,
                     )
                     residual = (target - x0_hat) * atom_pad_mask_3d # there there should be a **2
+                    residual_l2_norm = torch.norm(residual, p=2)**2
+                    conditioning_loss = 0.5 * residual_l2_norm
 
                 elif use_dihedrals_conditioning:
                     target_dihedrals = target_dihedrals.to(y_for_grad)
@@ -407,10 +410,6 @@ class EMSampler():
                     )
                     conditioning_loss = torch.norm(cos_residual, p=2) ** 2
 
-                if use_coords_conditioning:
-                    residual_l2_norm = torch.norm(residual, p=2)**2
-                    conditioning_loss = 0.5 * residual_l2_norm
-
                 grad_conditioning = torch.autograd.grad(
                     conditioning_loss,
                     y_for_grad,
@@ -422,12 +421,14 @@ class EMSampler():
             grad_conditioning_og = grad_conditioning.clone()
             score_og = score.clone()
             scale = score.norm() / (grad_conditioning.norm() + 1e-8)
- 
             grad_conditioning = grad_conditioning * scale
             score = score - 2.5 * grad_conditioning # 4 is too much
             # score = score - grad_conditioning # 4 is too much
 
-            self._log_exendiff(t, score_og, score, grad_conditioning_og, grad_conditioning, scale, {"conditioning_loss": (target_dihedrals.nan_to_num()-pred_dihedrals.nan_to_num()).sum().item()})
+            if i%2==0 and use_coords_conditioning:
+                self._log_exendiff(t, score_og, score, grad_conditioning_og, grad_conditioning, scale, {"conditioning_loss mse": (conditioning_loss).sum().item()})
+            elif use_dihedrals_conditioning:
+                self._log_exendiff(t, score_og, score, grad_conditioning_og, grad_conditioning, scale, {"conditioning_loss dihedrals": (target_dihedrals.nan_to_num()-pred_dihedrals.nan_to_num()).sum().item()})
 
         #* End of exendiff conditioning.
 
@@ -479,6 +480,7 @@ class EMSampler():
                 t,
                 t_next,
                 feats,
+                i,
             )
 
         self._save_dihedral_error_plot()
