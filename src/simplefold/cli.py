@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent))
 import argparse
+import subprocess
 from simplefold import __version__
 from simplefold.inference import predict_structures_from_fastas
 
@@ -43,10 +44,29 @@ def main():
         type=int,
         default=0,
         help=(
-            "Frame index to use when the target coordinates key has shape "
-            "(num_frames, num_atoms, 3)."
+            "Reference frame index in the conditioning NPZ. This frame is always "
+            "used for target dihedrals and is exported to output_dir as a PDB."
         ),
     )
+    parser.add_argument(
+        "--random_target_coords",
+        dest="random_target_coords",
+        action="store_true",
+        help=(
+            "Sample target_atom_coords from a random conditioning NPZ frame. "
+            "target_frame_idx is still used for target dihedrals."
+        ),
+    )
+    parser.add_argument(
+        "--no_random_target_coords",
+        dest="random_target_coords",
+        action="store_false",
+        help=(
+            "Disable random target coordinate frame sampling and use "
+            "target_frame_idx for target_atom_coords."
+        ),
+    )
+    parser.set_defaults(random_target_coords=True)
     parser.add_argument(
         "--version",
         action="version",
@@ -56,5 +76,23 @@ def main():
 
     print(f"Running protein folding with SimpleFold ...")
     predict_structures_from_fastas(args)
+
+    if args.target_conditioning_npz is not None:
+        repo_root = Path(__file__).resolve().parents[2]
+        analysis_script = repo_root / "scripts" / "cif_target_conditioning_atomwise_rmsd.py"
+        if not analysis_script.exists():
+            raise FileNotFoundError(
+                f"Could not find analysis script: {analysis_script}"
+            )
+        print("Running target-conditioning atomwise RMSD analysis ...")
+        subprocess.run(
+            [
+                sys.executable,
+                str(analysis_script),
+                "--run-dir",
+                str(Path(args.output_dir).resolve()),
+            ],
+            check=True,
+        )
 
 main()

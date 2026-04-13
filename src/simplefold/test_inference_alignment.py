@@ -4,6 +4,7 @@
 #
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(REPO_ROOT / "src" / "simplefold"))
 
-from simplefold.inference import attach_aligned_target_to_batch
+from simplefold.inference import attach_aligned_target_to_batch, load_external_conditioning_npz
 
 
 def _encode_atom_names(atom_names):
@@ -53,6 +54,61 @@ class TestInferenceAlignment(unittest.TestCase):
                 torch.tensor([[[[0, 1, 2, 3]]]], dtype=torch.long),
             )
         )
+
+    def test_load_external_conditioning_npz_random_coords_uses_target_frame_dihedrals(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            npz_path = tmpdir_path / "conditioning.npz"
+
+            trajectory = np.asarray(
+                [
+                    [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+                    [[10.0, 0.0, 0.0], [20.0, 0.0, 0.0]],
+                    [[100.0, 0.0, 0.0], [200.0, 0.0, 0.0]],
+                ],
+                dtype=np.float32,
+            )
+            dihedrals = np.asarray(
+                [
+                    [[0.0, 0.0, 0.0, 0.0, 0.0]],
+                    [[1.0, 1.0, 1.0, 1.0, 1.0]],
+                    [[2.0, 2.0, 2.0, 2.0, 2.0]],
+                ],
+                dtype=np.float32,
+            )
+            dihedral_atom_indices = np.broadcast_to(
+                np.asarray([0, 1, 0, 1], dtype=np.int64),
+                (1, 5, 4),
+            ).copy()
+            dihedral_mask = np.ones((1, 5), dtype=bool)
+            np.savez(
+                npz_path,
+                trajectory=trajectory,
+                atom_names=np.asarray(["N", "CA"]),
+                atom_residue_index=np.asarray([0, 0], dtype=np.int64),
+                dihedrals=dihedrals,
+                dihedral_atom_indices=dihedral_atom_indices,
+                dihedral_mask=dihedral_mask,
+            )
+
+            target_data = load_external_conditioning_npz(
+                npz_path,
+                target_frame_idx=1,
+                randomize_coords=True,
+                random_seed=42,
+                output_dir=tmpdir_path,
+            )
+
+            # random_seed=42 deterministically picks coordinate frame 0.
+            np.testing.assert_allclose(target_data["target_atom_coords"], trajectory[0])
+            np.testing.assert_allclose(target_data["dihedrals"], dihedrals[1])
+            self.assertEqual(target_data["target_frame_idx"], 1)
+            self.assertEqual(target_data["target_coords_frame_idx"], 0)
+
+            target_frame_pdb = tmpdir_path / "target_conditioning_target_frame_1.pdb"
+            random_frame_pdb = tmpdir_path / "target_conditioning_random_coords_frame_0.pdb"
+            self.assertTrue(target_frame_pdb.exists())
+            self.assertTrue(random_frame_pdb.exists())
 
 
 if __name__ == "__main__":

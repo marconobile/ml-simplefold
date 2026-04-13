@@ -270,3 +270,7 @@ python scripts/cif_npz_atomwise_rmsd.py  \
 --npz-path /storage_common/nobilm/backmapping_pots_model/datasets/inactive/whs/without_hs/backmapping_dataset.npz  \
 --frame-index 0 \
 --per-atom-out /home/nobilm@usi.ch/ml-simplefold/dbg_output_1000/predictions_simplefold_100M/a2a_nocappings_sampled_0_atomwise_rmsd.csv
+
+
+python /home/nobilm@usi.ch/ml-simplefold/scripts/cif_target_conditioning_atomwise_rmsd.py \
+  --run-dir /home/nobilm@usi.ch/ml-simplefold/dbg_output_rand_coords_as_targ

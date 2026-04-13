@@ -147,26 +147,165 @@ def _load_target_atom_residue_index(npz_data):
     return atom_residue_index, residue_key
 
 
-def _load_target_coords(npz_data, target_frame_idx):
+def _pdb_atom_name_field(atom_name):
+    atom_name = _normalize_atom_name(atom_name)[:4]
+    if len(atom_name) >= 4:
+        return atom_name[:4]
+    if atom_name and atom_name[0].isdigit():
+        return atom_name.ljust(4)
+    return f" {atom_name:<3}"
+
+
+def _pdb_element_symbol(atom_name):
+    atom_name = _normalize_atom_name(atom_name)
+    letters = [char for char in atom_name if char.isalpha()]
+    if not letters:
+        return "X"
+    return letters[0].upper()
+
+
+def _write_coords_to_pdb(
+    output_path,
+    coords,
+    atom_names,
+    atom_residue_index=None,
+    source_npz_path=None,
+    frame_idx=None,
+    label=None,
+):
+    output_path = Path(output_path)
+    coords = np.asarray(coords, dtype=np.float32)
+    atom_names = np.asarray(atom_names)
+
+    if coords.ndim != 2 or coords.shape[-1] != 3:
+        raise ValueError(f"Expected coordinates with shape (N, 3), got {coords.shape}.")
+    if atom_names.ndim != 1:
+        raise ValueError(f"Expected atom names with shape (N,), got {atom_names.shape}.")
+    if coords.shape[0] != atom_names.shape[0]:
+        raise ValueError(
+            "Coordinates and atom names lengths must match: "
+            f"{coords.shape[0]} vs {atom_names.shape[0]}."
+        )
+
+    residue_numbers = np.ones(coords.shape[0], dtype=np.int64)
+    if atom_residue_index is not None:
+        residue_numbers = np.asarray(atom_residue_index, dtype=np.int64).copy()
+        if residue_numbers.ndim != 1 or residue_numbers.shape[0] != coords.shape[0]:
+            raise ValueError(
+                "atom_residue_index must have shape (N,) matching coordinates. "
+                f"Got {residue_numbers.shape} for {coords.shape[0]} atoms."
+            )
+        min_residue = int(np.min(residue_numbers))
+        if min_residue <= 0:
+            residue_numbers = residue_numbers - min_residue + 1
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w") as handle:
+        if source_npz_path is not None:
+            handle.write(f"REMARK source_npz={source_npz_path}\n")
+        if frame_idx is not None:
+            handle.write(f"REMARK frame_idx={frame_idx}\n")
+        if label is not None:
+            handle.write(f"REMARK label={label}\n")
+        for atom_idx, (xyz, atom_name, residue_number) in enumerate(
+            zip(coords, atom_names, residue_numbers, strict=True),
+            start=1,
+        ):
+            atom_field = _pdb_atom_name_field(atom_name)
+            element = _pdb_element_symbol(atom_name)
+            x, y, z = float(xyz[0]), float(xyz[1]), float(xyz[2])
+            handle.write(
+                f"ATOM  {atom_idx:5d} {atom_field} UNK A{int(residue_number):4d}    "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00          {element:>2}\n"
+            )
+        handle.write("END\n")
+
+
+def _save_target_conditioning_reference_structures(
+    output_dir,
+    npz_path,
+    target_atom_names,
+    target_atom_residue_index,
+    target_frame_coords,
+    target_frame_idx,
+    target_coords,
+    target_coords_frame_idx,
+):
+    if output_dir is None:
+        return
+
+    output_dir = Path(output_dir)
+    target_idx_output_path = output_dir / f"target_conditioning_target_frame_{target_frame_idx}.pdb"
+    _write_coords_to_pdb(
+        target_idx_output_path,
+        coords=target_frame_coords,
+        atom_names=target_atom_names,
+        atom_residue_index=target_atom_residue_index,
+        source_npz_path=npz_path,
+        frame_idx=target_frame_idx,
+        label="target_frame_idx_reference",
+    )
+    print(
+        "Saved target conditioning reference structure from target_frame_idx: "
+        f"path={target_idx_output_path}, frame_idx={target_frame_idx}."
+    )
+
+    random_output_path = output_dir / f"target_conditioning_random_coords_frame_{target_coords_frame_idx}.pdb"
+    _write_coords_to_pdb(
+        random_output_path,
+        coords=target_coords,
+        atom_names=target_atom_names,
+        atom_residue_index=target_atom_residue_index,
+        source_npz_path=npz_path,
+        frame_idx=target_coords_frame_idx,
+        label="random_target_atom_coords_frame",
+    )
+    print(
+        "Saved target conditioning structure used for target_atom_coords: "
+        f"path={random_output_path}, frame_idx={target_coords_frame_idx}."
+    )
+
+
+def _load_target_coords(npz_data, target_frame_idx, randomize_coords=False, rng=None):
     coord_key = "trajectory"
-    target_atom_coords = np.asarray(npz_data[coord_key], dtype=np.float32)
-    if target_atom_coords.ndim == 3:
-        if target_frame_idx < 0 or target_frame_idx >= target_atom_coords.shape[0]:
+    all_target_atom_coords = np.asarray(npz_data[coord_key], dtype=np.float32)
+    target_coords_frame_idx = target_frame_idx
+    target_frame_coords = None
+    num_coordinate_frames = 1
+
+    if all_target_atom_coords.ndim == 3:
+        num_coordinate_frames = all_target_atom_coords.shape[0]
+        if target_frame_idx < 0 or target_frame_idx >= num_coordinate_frames:
             raise ValueError(
                 f"target_frame_idx={target_frame_idx} is out of bounds for "
-                f"coordinates with shape {target_atom_coords.shape}."
+                f"coordinates with shape {all_target_atom_coords.shape}."
             )
-        target_atom_coords = target_atom_coords[target_frame_idx]
-    elif target_atom_coords.ndim != 2:
+        target_frame_coords = all_target_atom_coords[target_frame_idx]
+        if randomize_coords:
+            if rng is None:
+                rng = np.random.default_rng()
+            target_coords_frame_idx = int(rng.integers(num_coordinate_frames))
+        target_atom_coords = all_target_atom_coords[target_coords_frame_idx]
+    elif all_target_atom_coords.ndim == 2:
+        target_atom_coords = all_target_atom_coords
+        target_frame_coords = target_atom_coords
+        target_coords_frame_idx = 0
+    else:
         raise ValueError(
-            f"Target atom coordinates must be shape (N, 3) or (T, N, 3), got {target_atom_coords.shape}."
+            f"Target atom coordinates must be shape (N, 3) or (T, N, 3), got {all_target_atom_coords.shape}."
         )
 
     if target_atom_coords.shape[-1] != 3:
         raise ValueError(
             f"Expected target atom coordinates to have last dimension 3, got shape {target_atom_coords.shape}."
         )
-    return target_atom_coords, coord_key
+    return (
+        target_atom_coords,
+        coord_key,
+        target_coords_frame_idx,
+        target_frame_coords,
+        num_coordinate_frames,
+    )
 
 
 def _load_target_dihedrals(npz_data, _target_frame_idx):
@@ -295,13 +434,31 @@ def _build_atom_residue_name_mapping(
     )
 
 
-def load_external_conditioning_npz(path, target_frame_idx):
+def load_external_conditioning_npz(
+    path,
+    target_frame_idx,
+    randomize_coords=False,
+    random_seed=None,
+    output_dir=None,
+):
     npz_path = Path(path)
     if not npz_path.exists():
         raise FileNotFoundError(f"Target conditioning NPZ not found: {npz_path}")
 
+    rng = np.random.default_rng(random_seed) if randomize_coords else None
     with np.load(npz_path, allow_pickle=False) as npz_data:
-        target_atom_coords, coords_key = _load_target_coords(npz_data, target_frame_idx)
+        (
+            target_atom_coords,
+            coords_key,
+            target_coords_frame_idx,
+            target_frame_coords,
+            num_coordinate_frames,
+        ) = _load_target_coords(
+            npz_data,
+            target_frame_idx,
+            randomize_coords=randomize_coords,
+            rng=rng,
+        )
         target_atom_names, names_key = _load_target_atom_names(npz_data)
         target_atom_residue_index, residue_key = _load_target_atom_residue_index(npz_data)
         target_dihedrals, dihedrals_key = _load_target_dihedrals(npz_data, target_frame_idx)
@@ -354,12 +511,25 @@ def load_external_conditioning_npz(path, target_frame_idx):
             context="Target NPZ",
         )
 
+    _save_target_conditioning_reference_structures(
+        output_dir=output_dir,
+        npz_path=npz_path,
+        target_atom_names=target_atom_names,
+        target_atom_residue_index=target_atom_residue_index,
+        target_frame_coords=target_frame_coords,
+        target_frame_idx=target_frame_idx,
+        target_coords=target_atom_coords,
+        target_coords_frame_idx=target_coords_frame_idx,
+    )
+
     print(
         "Loaded target conditioning NPZ: "
         f"path={npz_path}, coords_key={coords_key}, names_key={names_key}, "
         f"residue_key={residue_key}, dihedrals_key={dihedrals_key}, "
         f"dihedral_atom_indices_key={dihedral_atom_indices_key}, dihedral_mask_key={dihedral_mask_key}, "
-        f"num_atoms={target_atom_coords.shape[0]}."
+        f"num_atoms={target_atom_coords.shape[0]}, target_frame_idx={target_frame_idx}, "
+        f"target_coords_frame_idx={target_coords_frame_idx}, num_coordinate_frames={num_coordinate_frames}, "
+        f"randomize_coords={randomize_coords}."
     )
 
     return {
@@ -376,6 +546,10 @@ def load_external_conditioning_npz(path, target_frame_idx):
         "dihedrals_key": dihedrals_key,
         "dihedral_atom_indices_key": dihedral_atom_indices_key,
         "dihedral_mask_key": dihedral_mask_key,
+        "target_frame_idx": target_frame_idx,
+        "target_coords_frame_idx": target_coords_frame_idx,
+        "num_coordinate_frames": num_coordinate_frames,
+        "randomize_coords": randomize_coords,
     }
 
 
@@ -764,9 +938,13 @@ def predict_structures_from_fastas(args):
 
     target_conditioning_data = None
     if args.target_conditioning_npz is not None:
+        random_target_coords = bool(getattr(args, "random_target_coords", False))
         target_conditioning_data = load_external_conditioning_npz(
             args.target_conditioning_npz,
             target_frame_idx=args.target_frame_idx,
+            randomize_coords=random_target_coords,
+            random_seed=args.seed,
+            output_dir=output_dir,
         )
 
     # initialize models

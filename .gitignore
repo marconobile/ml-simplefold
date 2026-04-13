@@ -23,3 +23,4 @@ training_data/tokens/inapo.pkl
 training_data_backup/target_inapo/structures/inapo.npz
 traj_with_cluster_labels.npz
 Liu et al. - 2025 - ExEnDiff An Experiment-Guided Diffusion Model for Protein Conformational Ensemble Generation.pdf
+log_score.txt
