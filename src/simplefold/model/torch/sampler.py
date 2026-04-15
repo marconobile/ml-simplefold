@@ -29,29 +29,29 @@ from utils.boltz_utils import center_random_augmentation
 #     return timesteps
 
 
-# def generate_pattern(N = 500):
-#     timesteps = []
-#     for i in range(N):
-#         timesteps.append(i)
-#         timesteps.append(i)
+def generate_pattern(N = 500):
+    timesteps = []
+    for i in range(N):
+        timesteps.append(i)
+        timesteps.append(i)
 
-#     last_val = timesteps[-1]+1
-#     for i in range(N):
-#         timesteps.append(last_val+i)
-#     return timesteps
+    last_val = timesteps[-1]+1
+    for i in range(int(1.2*N)):
+        timesteps.append(last_val+i)
+    return timesteps
 
-def generate_pattern(blocks=500, n=1):
-    result = list(range(0, n + 1))  # first block: 0..n
+# def generate_pattern(blocks=500, n=1): # v5
+#     result = list(range(0, n + 1))  # first block: 0..n
 
-    for k in range(blocks):
-        start = k * n
-        end = (k + 2) * n
-        result.extend(range(start, end + 1))
+#     for k in range(blocks):
+#         start = k * n
+#         end = (k + 2) * n
+#         result.extend(range(start, end + 1))
 
-    last_val = result[-1]+1
-    for i in range(blocks):
-        result.append(last_val+i)
-    return result
+#     last_val = result[-1]+1
+#     for i in range(blocks):
+#         result.append(last_val+i)
+#     return result
 
 
 
@@ -404,7 +404,20 @@ class EMSampler():
                     fontsize=9,
                 )
             ax.set_xlabel("time t")
-            ax.set_ylabel("error [rad]")
+            ax.set_ylabel("wrapped error [rad]")
+            if np.any(finite_idx):
+                y_finite = y_vals[finite_idx]
+                y_min = float(np.min(y_finite))
+                y_max = float(np.max(y_finite))
+                if y_max > y_min:
+                    ax.set_ylim(y_min, y_max)
+                else:
+                    # Avoid singular axis when all values are identical.
+                    pad = max(1e-6, 1e-3 * max(abs(y_min), 1.0))
+                    ax.set_ylim(
+                        max(0.0, y_min - pad),
+                        min(float(np.pi), y_max + pad),
+                    )
             ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.35)
 
         for ax in axes[num_dihedrals:]:
@@ -504,7 +517,7 @@ class EMSampler():
         dihedral_atom_indices = batch.get("dihedral_atom_indices")
         dihedral_mask = batch.get("dihedral_mask")
 
-        use_exendiff = True # keep it like this for now
+        use_exendiff = False # keep it like this for now
         step_dihedral_error = None
         step_dihedral_valid_count = None
         if use_exendiff:
@@ -657,29 +670,36 @@ class EMSampler():
 
             l = generate_pattern()
 
-
-
+            #####################################################
+            #!#### og:
             # for i in tqdm(
-            #     l,
+            #     range(sampling_timesteps),
             #     desc="Sampling",
-            #     total=len(l),
+            #     total=sampling_timesteps,
             # ):
-            #     t = steps[i]
-            #     t_next = steps[i + 1]
-
-            for idx in tqdm(
-                range(len(l)),
+            #!#### better than below?:
+            for i in tqdm(
+                l,
                 desc="Sampling",
                 total=len(l),
             ):
-                if idx+1 == len(l):
-                    break
 
-                if l[idx] > l[idx+1]:
-                    continue
+            #!#### droppable?
+            # for idx in tqdm(
+            #     range(len(l)),
+            #     desc="Sampling",
+            #     total=len(l),
+            # ):
+            #     if idx+1 == len(l):
+            #         break
 
-                i = l[idx]
-                print(i, l[idx+1])
+            #     if l[idx] > l[idx+1]:
+            #         continue
+
+            #     i = l[idx]
+
+            #####################################################
+
                 t = steps[i]
                 t_next = steps[i + 1]
 
