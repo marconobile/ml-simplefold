@@ -863,6 +863,7 @@ def initialize_others(args, device):
     )
     if args.backend == "torch":
         sampler_kwargs["output_dir"] = Path(args.output_dir)
+        sampler_kwargs["trajectory_coord_scale"] = float(processor.scale)
 
     sampler = sampler_cls(**sampler_kwargs)
     return tokenizer, featurizer, processor, flow, sampler
