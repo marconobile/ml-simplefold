@@ -65,7 +65,8 @@ class DiTBlock(nn.Module):
             self.adaLN_modulation(c).chunk(6, dim=1)
         )
         _latents = self.attn(
-            modulate(self.norm1(latents), shift_msa, scale_msa), **kwargs
+            modulate(self.norm1(latents), shift_msa, scale_msa), # modulate broadcasts at atoms shape
+            **kwargs
         )
         latents = latents + gate_msa.unsqueeze(1) * _latents
         latents = latents + gate_mlp.unsqueeze(1) * self.mlp(

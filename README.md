@@ -40,23 +40,23 @@ python src/simplefold/evaluation/analyze_two_state.py \
 
 # Data preparation
 
-## Input expected:
-1) processed target: data required (*.npz + *.json)
-2) tokenized dataset: data required (*.pkl + *.json + manifest.json)
+## Required input data:
+1) processed target (*.npz + *.json)
+2) tokenized dataset (*.pkl + *.json + manifest.json)
 
-### Directory layout (see train_datamodule.py):
-We assume the training data is stored in with the following structure:
+## Directory layout (see train_datamodule.py):
+We assume the training data is stored in with the following structure (n.b. all the below is created by process_mmcif.py):
 
 - target_dir_for_dataset_A/
-    - structures/ ; created by process_mmcif.py
-        - {record_id}.npz # i.e. filename.npz; created by process_mmcif.py
+    - structures/
+        - {record_id}.npz
 
 - tokenized_dir_for_dataset_A/
     - tokens/
-        - {record_id}.pkl # i.e. filename.pkl
-    - records/ ; created by process_mmcif.py
-        - {record_id}.json # i.e. filename.json ; created by process_mmcif.py
-    - manifest.json # Groups records; created by process_mmcif.py
+        - {record_id}.pkl
+    - records/
+        - {record_id}.json
+    - manifest.json
 
 - target_dir_for_dataset_B/
     - ...
@@ -83,7 +83,7 @@ In `afesme_dict.json`, the data is stored in the following structure:
 
 Of course, one can use own customized datasets to train or tune SimpleFold models. Instructions below list how to process the dataset for SimpleFold training. -->
 
-#### Process mmcif structures
+## Process mmcif structures
 
 `process_mmcif.py` expects a local directory of mmCIF files (e.g., `*.cif` or `*.cif.gz`). If your `--data_dir` is empty, it will process `0` entries.
 
@@ -118,7 +118,7 @@ python src/simplefold/process_pdb.py \
     --out_dir [OUTPUT_DIR] \
     --use-assembly
 ```
-# Example data preparation pipeline:
+## Example data preparation pipeline:
 ```
 redis-server --dbfilename ccd.rdb --port 7777  # Note: run `redis-server` from the directory that contains `ccd.rdb`, or pass `--dir /path/to/ccd_dir` so Redis can load the database.
 python src/simplefold/process_pdb.py --data_dir /home/nobilm@usi.ch/ml-simplefold/data/pdb_for_train_test --out_dir /home/nobilm@usi.ch/ml-simplefold/training_data --use-assembly
@@ -199,6 +199,7 @@ Please check out the repository [LICENSE](LICENSE) before using the provided cod
 # Inference
 
 Once you have `simplefold` package installed, you can predict the protein structure from target fasta file(s) via the following command line. We provide support for both [PyTorch](https://pytorch.org/) and [MLX](https://mlx-framework.org/) (recommended for Apple hardware) backends in inference.
+Fasta sequence to use: https://rest.uniprot.org/uniprotkb/P29274.fasta
 ```
 simplefold \
     --simplefold_model simplefold_100M \  # specify folding model in simplefold_100M/360M/700M/1.1B/1.6B/3B
@@ -226,32 +227,20 @@ python -m pip install -U pip build; pip install -e .
 ```
 
 
-# Final Dataset for Backmapping:
-ACTIVE: /storage_common/angiod/phase-data/projects/a2a/systems/a2a/clusters/cb3c3cae-5316-47db-8fbb-0567d5f0f75b/samples/e98051c1-744f-4522-bafd-2bfdeea9788b/backmapping_dataset.npz
-INACTIVE: /storage_common/angiod/phase-data/projects/a2a/systems/a2a/clusters/cb3c3cae-5316-47db-8fbb-0567d5f0f75b/samples/7cd3f1a1-3b15-4de3-b1e3-5d2d1176b5fe/backmapping_dataset.npz
-PAS: /storage_common/angiod/phase-data/projects/a2a/systems/a2a/clusters/cb3c3cae-5316-47db-8fbb-0567d5f0f75b/samples/f121244e-b111-4e84-a67e-51f677718282/backmapping_dataset.npz
+
+<!-- python /home/nobilm@usi.ch/ml-simplefold/src/simplefold/cli.py \
+  --backend torch \
+  --fasta_path /home/nobilm@usi.ch/ml-simplefold/a2a_nocappings.fasta \
+  --output_dir /home/nobilm@usi.ch/ml-simplefold/A2a_via_cli_test_exendiff \
+  --target_conditioning_npz /storage_common/nobilm/backmapping_pots_model/datasets/active/without_hs/backmapping_dataset.npz \
+  --target_frame_idx 0
+
+python scripts/cif_npz_atomwise_rmsd.py  \
+--cif-path /home/nobilm@usi.ch/ml-simplefold/dbg_output_1000/predictions_simplefold_100M/a2a_nocappings_sampled_0.cif \
+--npz-path /storage_common/nobilm/backmapping_pots_model/datasets/inactive/whs/without_hs/backmapping_dataset.npz  \
+--frame-index 0 \
+--per-atom-out /home/nobilm@usi.ch/ml-simplefold/dbg_output_1000/predictions_simplefold_100M/a2a_nocappings_sampled_0_atomwise_rmsd.csv
 
 
-trajectory (49996, 4746, 3) # xyz
-atom_resids (4746,) # this starts from 1 # first el is capping to be removed
-atom_names (4746,)
-atom_residue_index (4746,) # this starts from 0
-residue_keys (300,)
-residue_cluster_ids (49996, 300)
-residue_cluster_counts (300,)
-frame_indices (49996,)
-frame_state_ids (49996,)
-state_id ()
-sample_id ()
-dihedrals (49996, 300, 5)
-dihedral_keys (5,)
-
-
-python drop_hs.py --input-npz /storage_common/nobilm/backmapping_pots_model/datasets/active/with_hs/backmapping_dataset.npz
-out: /storage_common/nobilm/backmapping_pots_model/datasets/active/without_hs/backmapping_dataset.npz
-
-python drop_hs.py --input-npz /storage_common/nobilm/backmapping_pots_model/datasets/inactive/with_hs/backmapping_dataset.npz
-out: /storage_common/nobilm/backmapping_pots_model/datasets/inactive/without_hs/backmapping_dataset.npz
-
-python drop_hs.py --input-npz /storage_common/nobilm/backmapping_pots_model/datasets/pas/with_hs/backmapping_dataset.npz
-out: /storage_common/nobilm/backmapping_pots_model/datasets/pas/without_hs/backmapping_dataset.npz
+python /home/nobilm@usi.ch/ml-simplefold/scripts/cif_target_conditioning_atomwise_rmsd.py \
+  --run-dir /home/nobilm@usi.ch/ml-simplefold/dbg_output_rand_coords_as_targ -->
