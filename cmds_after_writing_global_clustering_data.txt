@@ -1,0 +1,26 @@
+redis-server --dbfilename ccd.rdb --port 7777 # execute in same folder of /ml-simplefold/ccd.rdb
+
+# 1) Convert trajectory NPZ to SimpleFold training target format
+python src/simplefold/process_pdb.py \
+  --data_dir /home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/active_without_hs.npz \
+  --out_dir /scratch/nobilm/quantum_backmapping/training_data_active_npz \
+  --record-prefix active_without_hs
+
+# (equivalent with process_mmcif.py also works)
+
+# 2) Build token files (recommended for speed)
+python src/simplefold/process_structure.py \
+  --target_dir /scratch/nobilm/quantum_backmapping/training_data_active_npz \
+  --token_dir /scratch/nobilm/quantum_backmapping/training_data_active_npz
+
+
+# 3) Train with train.py using this dataset
+python src/simplefold/train.py experiment=train \
+  data.datasets[0].target_dir=/scratch/nobilm/quantum_backmapping/training_data_active_npz \
+  data.datasets[0].tokenized_dir=/scratch/nobilm/quantum_backmapping/training_data_active_npz \
+  data.datasets[0].manifest_path=/scratch/nobilm/quantum_backmapping/training_data_active_npz/manifest.json
+
+
+checkpoints are saved at:
+/storage_common/nobilm/ml-simplefold/artifacts/checkpoints
+following root_dir in configs/paths/default.yaml and dirpath in configs/callbacks/model_checkpoint.yaml

@@ -85,6 +85,7 @@ class SimpleFoldTrainingDataset(torch.utils.data.Dataset):
         self.return_symmetries = return_symmetries
         self.rotation_augment_ref_pos = rotation_augment_ref_pos
         self.rotation_augment_coords = rotation_augment_coords
+        self.atom_cluster_feature_key = "atom_idx_and_glob_cluster_id_per_frame"
         self.samples = []
         self.num_samples = 0
         for dataset_idx, dataset in enumerate(datasets):
@@ -202,10 +203,65 @@ class SimpleFoldTrainingDataset(torch.utils.data.Dataset):
             print(f"Featurizer failed on {record.id} with error {e}. Skipping.")
             return self.__getitem__(random.randint(0, self.num_samples - 1))
 
+        atom_cluster_ids = self._load_cropped_atom_cluster_ids(
+            dataset=dataset,
+            record_id=record.id,
+            tokenized=tokenized,
+            num_model_atoms=int(features["ref_pos"].shape[0]),
+        )
+        if atom_cluster_ids is not None:
+            features[self.atom_cluster_feature_key] = atom_cluster_ids
+
         return features
 
     def __len__(self) -> int:
         return self.num_samples
+
+    @staticmethod
+    def _get_cropped_atom_indices(tokenized) -> np.ndarray:
+        atom_indices = []
+        for token in tokenized.tokens:
+            start = int(token["atom_idx"])
+            atom_num = int(token["atom_num"])
+            atom_indices.extend(range(start, start + atom_num))
+        return np.asarray(atom_indices, dtype=np.int64)
+
+    def _load_cropped_atom_cluster_ids(
+        self,
+        dataset: Dataset,
+        record_id: str,
+        tokenized,
+        num_model_atoms: int,
+    ) -> Optional[Tensor]:
+        struct_path = dataset.target_dir / "structures" / f"{record_id}.npz"
+        if not struct_path.exists():
+            struct_path = dataset.target_dir / "structures" / f"{record_id.lower()}.npz"
+        if not struct_path.exists():
+            return None
+
+        try:
+            with np.load(struct_path, allow_pickle=False) as structure_data:
+                if self.atom_cluster_feature_key not in structure_data.files:
+                    return None
+                atom_cluster_ids = torch.from_numpy(
+                    structure_data[self.atom_cluster_feature_key].astype(np.int64, copy=False)
+                )
+        except Exception:
+            return None
+
+        cropped_atom_indices = self._get_cropped_atom_indices(tokenized)
+        if cropped_atom_indices.size == 0:
+            return torch.full((num_model_atoms,), -1, dtype=torch.long)
+
+        if int(cropped_atom_indices.max()) >= int(atom_cluster_ids.shape[0]):
+            return None
+
+        cropped_atom_cluster_ids = atom_cluster_ids[cropped_atom_indices]
+        padded_atom_cluster_ids = torch.full((num_model_atoms,), -1, dtype=torch.long)
+        padded_atom_cluster_ids[: cropped_atom_cluster_ids.shape[0]] = (
+            cropped_atom_cluster_ids
+        )
+        return padded_atom_cluster_ids
 
 
 class SimpleFoldTrainingDataModule(LightningDataModule):

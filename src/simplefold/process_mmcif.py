@@ -18,10 +18,19 @@ from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
-import rdkit
-from redis import Redis
+try:
+    import rdkit
+except ImportError:
+    rdkit = None
+try:
+    from redis import Redis
+except ImportError:
+    Redis = None
 from tqdm import tqdm
-from p_tqdm import p_umap
+try:
+    from p_tqdm import p_umap
+except ImportError:
+    p_umap = None
 
 from boltz_data_pipeline.filter.static.filter import StaticFilter
 from boltz_data_pipeline.filter.static.ligand import ExcludedLigands
@@ -32,7 +41,10 @@ from boltz_data_pipeline.filter.static.polymer import (
     UnknownFilter
 )
 from boltz_data_pipeline.types import ChainInfo, Record, Target
-from utils.mmcif_utils import parse_mmcif
+from utils.trajectory_npz_utils import (
+    convert_trajectory_npz_to_simplefold,
+    is_trajectory_npz_input,
+)
 
 
 """
@@ -56,6 +68,10 @@ class Resource:
 
     def __init__(self, host: str, port: int) -> None:
         """Initialize the redis database."""
+        if Redis is None:
+            raise ImportError(
+                "The `redis` package is required for PDB/mmCIF processing."
+            )
         self._redis = Redis(host=host, port=port)
 
     def get(self, key: str) -> Any:
@@ -176,6 +192,8 @@ def parse(data: PDB, resource: Resource, clusters: dict, use_assembly: bool) -> 
     pdb_id = data.id.lower()
 
     # Parse structure
+    from utils.mmcif_utils import parse_mmcif
+
     parsed = parse_mmcif(data.path, resource, use_assembly=use_assembly)
     structure = parsed.data
     structure_info = parsed.info
@@ -269,6 +287,17 @@ def process_structure(
 
 def process(args) -> None:
     """Run the data processing task."""
+    if is_trajectory_npz_input(args.data_dir):
+        convert_trajectory_npz_to_simplefold(
+            npz_path=args.data_dir,
+            out_dir=args.out_dir,
+            frame_stride=args.frame_stride,
+            max_frames=args.max_frames,
+            start_frame=args.start_frame,
+            record_prefix=args.record_prefix,
+        )
+        return
+
     # Create output directory
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -289,6 +318,11 @@ def process(args) -> None:
     ]
 
     # Set default pickle properties
+    if rdkit is None:
+        raise SystemExit(
+            "RDKit is required for processing PDB/mmCIF files. "
+            "Install `rdkit` or run with a trajectory `.npz` input."
+        )
     pickle_option = rdkit.Chem.PropertyPickleOptions.AllProps
     rdkit.Chem.SetDefaultPickleProperties(pickle_option)
 
@@ -310,17 +344,29 @@ def process(args) -> None:
     # Run processing
     print("Processing data...")
     if parallel:
-        # Create processing function
-        fn = partial(
-            process_structure,
-            resource=resource,
-            out_dir=args.out_dir,
-            clusters={},
-            filters=filters,
-            use_assembly=args.use_assembly,
-        )
-        # Run processing in parallel
-        p_umap(fn, data, num_cpus=num_processes)
+        if p_umap is None:
+            print("`p_tqdm` is not installed; falling back to sequential processing.")
+            for item in tqdm(data):
+                process_structure(
+                    item,
+                    resource=resource,
+                    out_dir=args.out_dir,
+                    clusters={},
+                    filters=filters,
+                    use_assembly=args.use_assembly,
+                )
+        else:
+            # Create processing function
+            fn = partial(
+                process_structure,
+                resource=resource,
+                out_dir=args.out_dir,
+                clusters={},
+                filters=filters,
+                use_assembly=args.use_assembly,
+            )
+            # Run processing in parallel
+            p_umap(fn, data, num_cpus=num_processes)
     else:
         for item in tqdm(data):
             process_structure(
@@ -342,7 +388,7 @@ if __name__ == "__main__":
         "--data_dir",
         type=Path,
         required=True,
-        help="The data containing the MMCIF files.",
+        help="Directory with mmCIF files, or a trajectory .npz file.",
     )
     parser.add_argument(
         "--out_dir",
@@ -377,6 +423,30 @@ if __name__ == "__main__":
         "--max-file-size",
         type=int,
         default=None,
+    )
+    parser.add_argument(
+        "--start-frame",
+        type=int,
+        default=0,
+        help="First frame to convert when --data_dir points to trajectory .npz.",
+    )
+    parser.add_argument(
+        "--frame-stride",
+        type=int,
+        default=1,
+        help="Frame stride when --data_dir points to trajectory .npz.",
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=None,
+        help="Optional max number of frames to convert from trajectory .npz.",
+    )
+    parser.add_argument(
+        "--record-prefix",
+        type=str,
+        default=None,
+        help="Optional record id prefix for trajectory .npz conversion.",
     )
     args = parser.parse_args()
     process(args)

@@ -175,6 +175,10 @@ class FoldingDiT(nn.Module):
         atom_to_token = feats["atom_to_token"].float() # [B, N, M]
         atom_to_token_idx = feats["atom_to_token_idx"]
         ref_space_uid = feats["ref_space_uid"]
+        atom_idx_and_glob_cluster_id_per_frame = feats.get(
+            "atom_idx_and_glob_cluster_id_per_frame",
+            None,
+        )
 
         # create atom attention masks
         atom_attn_mask_enc = self.create_atom_attn_mask(
@@ -255,6 +259,7 @@ class FoldingDiT(nn.Module):
             c=atom_c_emb_enc, 
             attention_mask=atom_attn_mask_enc,
             pos=atom_pe_pos,
+            atom_idx_and_glob_cluster_id_per_frame=atom_idx_and_glob_cluster_id_per_frame,
         )
         atom_latent = self.atom2latent_proj(atom_latent)
 
@@ -278,6 +283,7 @@ class FoldingDiT(nn.Module):
             c=c_emb, 
             attention_mask=None,
             pos=token_pe_pos,
+            atom_idx_and_glob_cluster_id_per_frame=atom_idx_and_glob_cluster_id_per_frame,
         )
 
         # ungrouping: broadcast residue tokens to atom tokens
@@ -295,6 +301,7 @@ class FoldingDiT(nn.Module):
             c=atom_c_emb_dec,
             attention_mask=atom_attn_mask_dec,
             pos=atom_pe_pos,
+            atom_idx_and_glob_cluster_id_per_frame=atom_idx_and_glob_cluster_id_per_frame,
         )
         output = self.final_layer(output, c=c_emb)
 

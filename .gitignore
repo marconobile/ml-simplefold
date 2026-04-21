@@ -4,6 +4,7 @@
 artifacts/
 data/
 A2a_via_cli/
+test_new_data_with_clusters/
 dbg_output/
 *.yaml
 *.log

@@ -59,8 +59,10 @@ class DiTBlock(nn.Module):
         self,
         latents,
         c,
+        atom_idx_and_glob_cluster_id_per_frame=None,
         **kwargs,
     ):
+        _ = atom_idx_and_glob_cluster_id_per_frame
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.adaLN_modulation(c).chunk(6, dim=1)
         )
