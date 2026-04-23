@@ -24,3 +24,27 @@ python src/simplefold/train.py experiment=train \
 checkpoints are saved at:
 /storage_common/nobilm/ml-simplefold/artifacts/checkpoints
 following root_dir in configs/paths/default.yaml and dirpath in configs/callbacks/model_checkpoint.yaml
+
+
+
+# finetuning:
+cd /home/nobilm@usi.ch/ml-simplefold && \
+CONDA_DEFAULT_ENV=simplefold \
+PATH=/home/nobilm@usi.ch/miniconda3/envs/simplefold/bin:$PATH \
+CUDA_VISIBLE_DEVICES=0 \
+/home/nobilm@usi.ch/miniconda3/envs/simplefold/bin/python src/simplefold/train.py \
+  experiment=train \
+  hydra.job.name=finetune_simplefold100M_active_npz_gpu0 \
+  paths.output_dir=/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/inapo_ft_active_npz_from_simplefold100M_gpu0 \
+  paths.tmp_dir=/tmp/simplefold_ft_active_npz_gpu0_tmp \
+  +load_ckpt_path=/home/nobilm@usi.ch/ml-simplefold/artifacts/simplefold_100M.ckpt \
+  trainer.accelerator=gpu trainer.devices=1 +trainer.max_epochs=100 \
+  data.datasets.0.target_dir=/scratch/nobilm/quantum_backmapping/training_data_active_npz \
+  data.datasets.0.tokenized_dir=/scratch/nobilm/quantum_backmapping/training_data_active_npz \
+  data.datasets.0.manifest_path=/scratch/nobilm/quantum_backmapping/training_data_active_npz/manifest.json \
+  callbacks.model_checkpoint.dirpath=/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/inapo_ft_active_npz_from_simplefold100M_gpu0/checkpoints \
+  "callbacks.model_checkpoint.filename='sf100M-ft-ep{epoch:04d}-step{step:08d}'" \
+  +callbacks.model_checkpoint.every_n_epochs=10 \
+  callbacks.model_checkpoint.save_on_train_epoch_end=True \
+  callbacks.model_checkpoint.every_n_train_steps=null
+
