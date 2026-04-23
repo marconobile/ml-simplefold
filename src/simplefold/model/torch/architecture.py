@@ -44,6 +44,15 @@ class FoldingDiT(nn.Module):
 
         self.time_embedder = time_embedder
 
+        self.max_possible_global_clu_idx = 1682
+        self.pad_idx = self.max_possible_global_clu_idx + 1
+        self.cluster_embeddings = torch.nn.Embedding(
+            self.pad_idx + 1,
+            256,
+            padding_idx=self.pad_idx,
+            max_norm=1.0,
+        )
+
         self.atom_encoder_transformer = atom_encoder_transformer
         self.atom_decoder_transformer = atom_decoder_transformer
 
@@ -117,8 +126,8 @@ class FoldingDiT(nn.Module):
         )
 
         self.final_layer = FinalLayer(
-            self.atom_hidden_size_dec, 
-            output_channels, 
+            self.atom_hidden_size_dec,
+            output_channels,
             c_dim=hidden_size
         )
 
@@ -149,10 +158,10 @@ class FoldingDiT(nn.Module):
         return attn_bias.to(device=device)[:n, :n]
 
     def create_atom_attn_mask(
-        self, 
-        feats, 
-        natoms, 
-        atom_n_queries=None, 
+        self,
+        feats,
+        natoms,
+        atom_n_queries=None,
         atom_n_keys=None,
         inf: float = 1e10
     ) -> torch.Tensor:
@@ -179,10 +188,12 @@ class FoldingDiT(nn.Module):
             "atom_idx_and_glob_cluster_id_per_frame",
             None,
         )
+        atom_idx_and_glob_cluster_id_per_frame[atom_idx_and_glob_cluster_id_per_frame == -1] = self.pad_idx
+        cluster_emb = self.cluster_embeddings(atom_idx_and_glob_cluster_id_per_frame.to(self.cluster_embeddings.weight.device))
 
         # create atom attention masks
         atom_attn_mask_enc = self.create_atom_attn_mask(
-            feats, 
+            feats,
             natoms=N,
             atom_n_queries=self.atom_n_queries_enc,
             atom_n_keys=self.atom_n_keys_enc,
@@ -206,7 +217,7 @@ class FoldingDiT(nn.Module):
         res_type = feats["res_type"].float()                        # [B, M, 33]
         pocket_feature = feats["pocket_feature"].float()            # [B, M, 4]
         res_feat = torch.cat(
-            [mol_type, res_type, pocket_feature], 
+            [mol_type, res_type, pocket_feature],
         dim=-1)                                                     # [B, M, 41]
         atom_feat_from_res = torch.bmm(atom_to_token, res_feat)     # [B, N, 41]
         atom_res_pos = self.aminoacid_pos_embedder(
@@ -254,12 +265,12 @@ class FoldingDiT(nn.Module):
         # atom encoder
         atom_c_emb_enc = self.atom_enc_cond_proj(c_emb)
         atom_latent = self.context2atom_proj(atom_in)
-        atom_latent = self.atom_encoder_transformer(
-            latents=atom_latent, 
-            c=atom_c_emb_enc, 
+        atom_latent = self.atom_encoder_transformer( # og shape: torch.Size([16, 1984, 256])
+            latents=atom_latent,
+            c=atom_c_emb_enc,
             attention_mask=atom_attn_mask_enc,
             pos=atom_pe_pos,
-            atom_idx_and_glob_cluster_id_per_frame=atom_idx_and_glob_cluster_id_per_frame,
+            cluster_emb=cluster_emb,
         )
         atom_latent = self.atom2latent_proj(atom_latent)
 
@@ -279,8 +290,8 @@ class FoldingDiT(nn.Module):
 
         # residue trunk
         latent = self.trunk(
-            latents=latent, 
-            c=c_emb, 
+            latents=latent,
+            c=c_emb,
             attention_mask=None,
             pos=token_pe_pos,
             atom_idx_and_glob_cluster_id_per_frame=atom_idx_and_glob_cluster_id_per_frame,
@@ -297,7 +308,7 @@ class FoldingDiT(nn.Module):
         # atom decoder
         atom_c_emb_dec = self.atom_dec_cond_proj(c_emb)
         output = self.atom_decoder_transformer(
-            latents=output, 
+            latents=output,
             c=atom_c_emb_dec,
             attention_mask=atom_attn_mask_dec,
             pos=atom_pe_pos,

@@ -41,6 +41,9 @@ class DiTBlock(nn.Module):
         )
         self.initialize_weights()
 
+        self.cluster_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
+        torch.nn.init.normal_(self.cluster_proj.weight, mean=0.0, std=1e-6)
+
     def initialize_weights(self):
         # Initialize transformer layers:
         def _basic_init(module):
@@ -59,21 +62,35 @@ class DiTBlock(nn.Module):
         self,
         latents,
         c,
-        atom_idx_and_glob_cluster_id_per_frame=None,
+        cluster_emb=None,
         **kwargs,
     ):
-        _ = atom_idx_and_glob_cluster_id_per_frame
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-            self.adaLN_modulation(c).chunk(6, dim=1)
-        )
+        if cluster_emb  is not None:
+            cluster_emb = self.cluster_proj(cluster_emb) # in_dims/out_dims: (bs, natoms, emb_dim)
+            c = cluster_emb + c.unsqueeze(1) # out_dims: (bs, natoms, emb_dim)
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = ( # all out shapes are: ((bs, emb_dim)
+                self.adaLN_modulation(c).chunk(6, dim=-1) # in_dims of c: (bs, emb_dim)
+            )
+        else:
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = ( # all out shapes are: ((bs, emb_dim)
+                self.adaLN_modulation(c).chunk(6, dim=1) # in_dims of c: (bs, emb_dim)
+            )
+
         _latents = self.attn(
-            modulate(self.norm1(latents), shift_msa, scale_msa), # modulate broadcasts at atoms shape
+            modulate(self.norm1(latents), shift_msa, scale_msa), # modulate broadcasts at atoms shape: out_dims: (bs, natoms, emb_dim)
             **kwargs
         )
-        latents = latents + gate_msa.unsqueeze(1) * _latents
-        latents = latents + gate_mlp.unsqueeze(1) * self.mlp(
-            modulate(self.norm2(latents), shift_mlp, scale_mlp)
-        )
+        if _latents.shape != gate_msa.shape:
+            latents = latents + gate_msa.unsqueeze(1) * _latents
+            latents = latents + gate_mlp.unsqueeze(1) * self.mlp(
+                modulate(self.norm2(latents), shift_mlp, scale_mlp)
+            )
+        else:
+            latents = latents + gate_msa * _latents
+            latents = latents + gate_mlp * self.mlp(
+                modulate(self.norm2(latents), shift_mlp, scale_mlp)
+            )
+
         return latents
 
 

@@ -11,6 +11,8 @@ import torch.nn.functional as F
 
 
 def modulate(x, shift, scale):
+    if x.shape == scale.shape == shift.shape:
+        return x * (1 + scale) + shift
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 

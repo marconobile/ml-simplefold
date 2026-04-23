@@ -16,9 +16,9 @@ python src/simplefold/process_structure.py \
 
 # 3) Train with train.py using this dataset
 python src/simplefold/train.py experiment=train \
-  data.datasets[0].target_dir=/scratch/nobilm/quantum_backmapping/training_data_active_npz \
-  data.datasets[0].tokenized_dir=/scratch/nobilm/quantum_backmapping/training_data_active_npz \
-  data.datasets[0].manifest_path=/scratch/nobilm/quantum_backmapping/training_data_active_npz/manifest.json
+  data.datasets.0.target_dir=/scratch/nobilm/quantum_backmapping/training_data_active_npz \
+  data.datasets.0.tokenized_dir=/scratch/nobilm/quantum_backmapping/training_data_active_npz \
+  data.datasets.0.manifest_path=/scratch/nobilm/quantum_backmapping/training_data_active_npz/manifest.json
 
 
 checkpoints are saved at:
