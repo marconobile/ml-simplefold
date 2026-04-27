@@ -174,7 +174,7 @@ CUDA_VISIBLE_DEVICES=0 python src/simplefold/train.py experiment=train   hydra.j
 ```
 
 #### Tensorboard:
-cd /run_name/tensorboard; run tensorboard --logdir=.
+cd {$paths.output_dir}; tensorboard --logdir=.
 
 <!-- ## Citation
 If you found this code useful, please cite the following paper:

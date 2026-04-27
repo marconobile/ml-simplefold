@@ -11,7 +11,7 @@ sample_dir: ${paths.sample_dir}
 architecture:
   esm_model: ${model.esm_model}
 
-path: 
+path:
   _target_: model.flow.LinearPath
 
 loss:
@@ -22,14 +22,14 @@ loss:
 optimizer:
   _target_: torch.optim.AdamW
   _partial_: true
-  lr: 1e-4
+  lr: 1e-5
   weight_decay: 0.0
   max_steps: ???
 
 scheduler:
   _target_: utils.lr_scheduler.LinearWarmup
   _partial_: true
-  min_lr: 1e-6
+  min_lr: 1e-8
   max_lr: ${model.optimizer.lr}
   warmup_steps: 10
 
