@@ -226,8 +226,8 @@ conda activate simplefold
 python -m pip install -U pip build; pip install -e .
 ```
 
-
-
+python scripts/evaluate_active_npz_conditioned_sample.py --frame-index 0 --seed 123
+`Trainer.fit` stopped: `max_steps=300000` reached.
 <!-- python /home/nobilm@usi.ch/ml-simplefold/src/simplefold/cli.py \
   --backend torch \
   --fasta_path /home/nobilm@usi.ch/ml-simplefold/a2a_nocappings.fasta \
