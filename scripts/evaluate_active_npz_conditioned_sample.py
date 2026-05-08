@@ -40,6 +40,11 @@ Input and output arguments:
         histogram files, and mmCIF structures are written. Defaults to
         artifacts/active_npz_conditioned_eval under the repo root.
 
+    --conditioned-eval-pdb-base-path PATH
+        Base path passed to scripts/convert_conditioned_eval_cifs_to_pdb.py
+        before dihedral evaluation when --output-dir is inside that tree.
+        Defaults to /storage_common/nobilm/backmapping_pots_model/results.
+
 Checkpoint and model arguments:
 
     --checkpoint-dir PATH
@@ -108,6 +113,7 @@ import csv
 import gc
 import json
 import pickle
+import subprocess
 import sys
 from copy import deepcopy
 from dataclasses import asdict
@@ -147,7 +153,12 @@ DEFAULT_CHECKPOINT_DIR = Path(
     "/storage_common/nobilm/ml-simplefold/"
     "fine_tune_with_clusters/inapo_ft_active_npz_from_simplefold100M_gpu0/checkpoints"
 )
+DEFAULT_CONDITIONED_EVAL_PDB_BASE_PATH = Path(
+    "/storage_common/nobilm/backmapping_pots_model/results"
+)
 CLUSTER_KEY = "atom_idx_and_glob_cluster_id_per_frame"
+CONDITIONED_EVAL_SAMPLED_CIF_TOKEN = "_conditioned_eval_sampled.cif"
+PDB_ATOM_RECORDS = ("ATOM", "HETATM")
 
 
 def parse_args() -> argparse.Namespace:
@@ -210,6 +221,16 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=REPO_ROOT / "artifacts/active_npz_conditioned_eval",
         help="Directory for JSON, NPZ, and CSV evaluation outputs.",
+    )
+    parser.add_argument(
+        "--conditioned-eval-pdb-base-path",
+        type=Path,
+        default=DEFAULT_CONDITIONED_EVAL_PDB_BASE_PATH,
+        help=(
+            "Base path passed to scripts/convert_conditioned_eval_cifs_to_pdb.py "
+            "before dihedral evaluation when --output-dir is inside this tree. "
+            "Otherwise, only --output-dir is converted."
+        ),
     )
     parser.add_argument(
         "--frame-index",
@@ -795,6 +816,113 @@ def kabsch_align(
     return aligned.astype(np.float32), global_rmsd, atomwise_rmsd
 
 
+def conditioned_eval_sampled_pdb_path(cif_path: Path) -> Path:
+    if cif_path.name.endswith(CONDITIONED_EVAL_SAMPLED_CIF_TOKEN):
+        return cif_path.with_suffix(".pdb")
+
+    pdb_name = cif_path.name.replace(
+        CONDITIONED_EVAL_SAMPLED_CIF_TOKEN,
+        "_conditioned_eval_sampled.pdb",
+        1,
+    )
+    return cif_path.with_name(pdb_name)
+
+
+def resolve_conditioned_eval_converter_base_path(
+    configured_base_path: Path,
+    output_dir: Path,
+) -> Path:
+    configured_base_path = configured_base_path.expanduser().resolve()
+    output_dir = output_dir.expanduser().resolve()
+    if configured_base_path.exists() and output_dir.is_relative_to(configured_base_path):
+        return configured_base_path
+    return output_dir
+
+
+def run_conditioned_eval_cif_to_pdb_converter(base_path: Path) -> None:
+    converter_path = REPO_ROOT / "scripts" / "convert_conditioned_eval_cifs_to_pdb.py"
+    command = [
+        sys.executable,
+        str(converter_path),
+        "--base-path",
+        str(base_path),
+    ]
+    print("Running CIF-to-PDB converter: " + " ".join(command))
+    subprocess.run(command, check=True)
+
+
+def ensure_conditioned_eval_sampled_pdb(
+    sampled_cif_path: Path,
+    configured_base_path: Path,
+    output_dir: Path,
+) -> Path:
+    sampled_pdb_path = conditioned_eval_sampled_pdb_path(sampled_cif_path)
+    converter_base_path = resolve_conditioned_eval_converter_base_path(
+        configured_base_path,
+        output_dir,
+    )
+
+    try:
+        run_conditioned_eval_cif_to_pdb_converter(converter_base_path)
+    except subprocess.CalledProcessError:
+        if converter_base_path == sampled_cif_path:
+            raise
+        print(
+            "Warning: base-path conversion failed; retrying only the current "
+            f"sampled CIF: {sampled_cif_path}"
+        )
+        run_conditioned_eval_cif_to_pdb_converter(sampled_cif_path)
+
+    if not sampled_pdb_path.exists():
+        run_conditioned_eval_cif_to_pdb_converter(sampled_cif_path)
+
+    if not sampled_pdb_path.exists():
+        raise FileNotFoundError(
+            "CIF-to-PDB conversion did not produce the expected sampled PDB: "
+            f"{sampled_pdb_path}"
+        )
+    return sampled_pdb_path
+
+
+def read_pdb_atom_coordinates(path: Path) -> np.ndarray:
+    coords: list[list[float]] = []
+    with path.open() as handle:
+        for line_num, line in enumerate(handle, start=1):
+            if not line.startswith(PDB_ATOM_RECORDS):
+                continue
+            if len(line) < 54:
+                raise ValueError(f"{path}: malformed ATOM/HETATM line at {line_num}.")
+            try:
+                coords.append(
+                    [
+                        float(line[30:38]),
+                        float(line[38:46]),
+                        float(line[46:54]),
+                    ]
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    f"{path}: malformed coordinates in ATOM/HETATM line {line_num}."
+                ) from exc
+
+    if not coords:
+        raise ValueError(f"{path}: no ATOM/HETATM records found.")
+    return np.asarray(coords, dtype=np.float32)
+
+
+def load_sampled_pdb_dihedral_coords(
+    sampled_pdb_path: Path,
+    expected_shape: tuple[int, int],
+) -> np.ndarray:
+    coords = read_pdb_atom_coordinates(sampled_pdb_path)
+    if coords.shape != expected_shape:
+        raise ValueError(
+            f"Converted sampled PDB has coordinates with shape {coords.shape}, "
+            f"but expected {expected_shape}: {sampled_pdb_path}"
+        )
+    return coords
+
+
 def compute_dihedral_angles(
     coords: np.ndarray,
     atom_indices: np.ndarray,
@@ -1184,6 +1312,7 @@ def write_report(
     path: Path,
     metrics: dict[str, Any],
     sampled_cif_path: Path,
+    sampled_pdb_path: Path | None,
     target_cif_path: Path,
     arrays_path: Path,
     atom_csv_path: Path,
@@ -1223,6 +1352,23 @@ def write_report(
         "  stored_vs_recomputed_original_mae_deg: "
         f"{format_optional_float(dihedrals.get('stored_vs_recomputed_original_mae_deg'))}",
     ]
+    if dihedrals.get("sampled_dihedral_source") is not None:
+        lines.append(f"  sampled_dihedral_source: {dihedrals.get('sampled_dihedral_source')}")
+    if dihedrals.get("sampled_pdb_path") is not None:
+        lines.append(f"  sampled_pdb_path: {dihedrals.get('sampled_pdb_path')}")
+
+    raw_vs_pdb = dihedrals.get("sampled_raw_vs_pdb")
+    if raw_vs_pdb is not None:
+        lines.extend(
+            [
+                "  sampled_raw_vs_pdb_count: "
+                f"{raw_vs_pdb.get('count', 'n/a')}",
+                "  sampled_raw_vs_pdb_mae_deg: "
+                f"{format_optional_float(raw_vs_pdb.get('mae_deg'))}",
+                "  sampled_raw_vs_pdb_max_abs_error_deg: "
+                f"{format_optional_float(raw_vs_pdb.get('max_abs_error_deg'))}",
+            ]
+        )
     raw_vs_aligned = dihedrals.get("sampled_raw_vs_aligned")
     if raw_vs_aligned is not None:
         lines.extend(
@@ -1233,6 +1379,18 @@ def write_report(
                 f"{format_optional_float(raw_vs_aligned.get('mae_deg'))}",
                 "  sampled_raw_vs_aligned_max_abs_error_deg: "
                 f"{format_optional_float(raw_vs_aligned.get('max_abs_error_deg'))}",
+            ]
+        )
+    aligned_vs_pdb = dihedrals.get("sampled_aligned_vs_pdb")
+    if aligned_vs_pdb is not None:
+        lines.extend(
+            [
+                "  sampled_aligned_vs_pdb_count: "
+                f"{aligned_vs_pdb.get('count', 'n/a')}",
+                "  sampled_aligned_vs_pdb_mae_deg: "
+                f"{format_optional_float(aligned_vs_pdb.get('mae_deg'))}",
+                "  sampled_aligned_vs_pdb_max_abs_error_deg: "
+                f"{format_optional_float(aligned_vs_pdb.get('max_abs_error_deg'))}",
             ]
         )
 
@@ -1275,6 +1433,8 @@ def write_report(
             f"  atomwise_rmsd_csv: {atom_csv_path}",
         ]
     )
+    if sampled_pdb_path is not None:
+        lines.append(f"  sampled_model_pdb_for_dihedrals: {sampled_pdb_path}")
     if raw_sampled_cif_path is not None:
         lines.append(f"  sampled_model_raw_unaligned_cif: {raw_sampled_cif_path}")
     if dihedral_csv_path is not None:
@@ -1429,45 +1589,12 @@ def main() -> None:
 
     dihedral_summary = None
     sampled_dihedrals = None
+    sampled_raw_dihedrals = None
+    sampled_aligned_dihedrals = None
     original_recomputed_dihedrals = None
     dihedral_diff_rad = None
     dihedral_abs_error_deg = None
-    if original_dihedrals is not None:
-        sampled_dihedrals = compute_dihedral_angles(
-            sampled_coords,
-            frame_data["dihedral_atom_indices"],
-            frame_data["dihedral_mask"],
-        )
-        sampled_aligned_dihedrals = compute_dihedral_angles(
-            aligned_sampled_coords,
-            frame_data["dihedral_atom_indices"],
-            frame_data["dihedral_mask"],
-        )
-        original_recomputed_dihedrals = compute_dihedral_angles(
-            selected_sample,
-            frame_data["dihedral_atom_indices"],
-            frame_data["dihedral_mask"],
-        )
-        dihedral_summary, dihedral_diff_rad, dihedral_abs_error_deg = summarize_dihedrals(
-            original_dihedrals=original_dihedrals,
-            sampled_dihedrals=sampled_dihedrals,
-            original_recomputed_dihedrals=original_recomputed_dihedrals,
-            dihedral_mask=frame_data["dihedral_mask"],
-            dihedral_keys=frame_data["dihedral_keys"],
-        )
-        add_dihedral_validation_summary(
-            dihedral_summary,
-            "sampled_raw_vs_aligned",
-            sampled_dihedrals,
-            sampled_aligned_dihedrals,
-            frame_data["dihedral_mask"],
-        )
-        print(
-            "Dihedral MAE: "
-            f"{dihedral_summary['mae_deg']:.4f} deg over {dihedral_summary['count']} angles"
-        )
-    else:
-        print("Skipping dihedral comparison because no raw trajectory dihedrals were available.")
+    sampled_pdb_coords = None
 
     output_stem = f"{frame_data['record_id']}_conditioned_eval"
     metrics_path = args.output_dir / f"{output_stem}.json"
@@ -1517,6 +1644,74 @@ def main() -> None:
         output_format="mmcif",
     )
 
+    sampled_pdb_path = ensure_conditioned_eval_sampled_pdb(
+        sampled_cif_path=sampled_cif_path,
+        configured_base_path=args.conditioned_eval_pdb_base_path,
+        output_dir=args.output_dir,
+    )
+
+    if original_dihedrals is not None:
+        sampled_pdb_coords = load_sampled_pdb_dihedral_coords(
+            sampled_pdb_path,
+            expected_shape=original_coords.shape,
+        )
+        sampled_dihedrals = compute_dihedral_angles(
+            sampled_pdb_coords,
+            frame_data["dihedral_atom_indices"],
+            frame_data["dihedral_mask"],
+        )
+        sampled_raw_dihedrals = compute_dihedral_angles(
+            sampled_coords,
+            frame_data["dihedral_atom_indices"],
+            frame_data["dihedral_mask"],
+        )
+        sampled_aligned_dihedrals = compute_dihedral_angles(
+            aligned_sampled_coords,
+            frame_data["dihedral_atom_indices"],
+            frame_data["dihedral_mask"],
+        )
+        original_recomputed_dihedrals = compute_dihedral_angles(
+            selected_sample,
+            frame_data["dihedral_atom_indices"],
+            frame_data["dihedral_mask"],
+        )
+        dihedral_summary, dihedral_diff_rad, dihedral_abs_error_deg = summarize_dihedrals(
+            original_dihedrals=original_dihedrals,
+            sampled_dihedrals=sampled_dihedrals,
+            original_recomputed_dihedrals=original_recomputed_dihedrals,
+            dihedral_mask=frame_data["dihedral_mask"],
+            dihedral_keys=frame_data["dihedral_keys"],
+        )
+        dihedral_summary["sampled_dihedral_source"] = "converted_conditioned_eval_sampled_pdb"
+        dihedral_summary["sampled_pdb_path"] = str(sampled_pdb_path)
+        add_dihedral_validation_summary(
+            dihedral_summary,
+            "sampled_raw_vs_pdb",
+            sampled_raw_dihedrals,
+            sampled_dihedrals,
+            frame_data["dihedral_mask"],
+        )
+        add_dihedral_validation_summary(
+            dihedral_summary,
+            "sampled_raw_vs_aligned",
+            sampled_raw_dihedrals,
+            sampled_aligned_dihedrals,
+            frame_data["dihedral_mask"],
+        )
+        add_dihedral_validation_summary(
+            dihedral_summary,
+            "sampled_aligned_vs_pdb",
+            sampled_aligned_dihedrals,
+            sampled_dihedrals,
+            frame_data["dihedral_mask"],
+        )
+        print(
+            "Dihedral MAE from converted sampled PDB: "
+            f"{dihedral_summary['mae_deg']:.4f} deg over {dihedral_summary['count']} angles"
+        )
+    else:
+        print("Skipping dihedral comparison because no raw trajectory dihedrals were available.")
+
     if original_dihedrals is not None and dihedral_summary is not None:
         dihedral_histogram_artifacts = write_dihedral_histograms(
             output_dir=args.output_dir,
@@ -1536,6 +1731,7 @@ def main() -> None:
         "processed_dir": str(processed_dir) if processed_dir is not None else None,
         "checkpoint_path": str(checkpoint_path),
         "sampled_cif_path": str(sampled_cif_path),
+        "sampled_pdb_path": str(sampled_pdb_path),
         "raw_sampled_cif_path": str(raw_sampled_cif_path),
         "target_reference_cif_path": str(target_cif_path),
         "record_id": frame_data["record_id"],
@@ -1573,7 +1769,9 @@ def main() -> None:
             {
                 "original_dihedrals": original_dihedrals,
                 "sampled_dihedrals": sampled_dihedrals,
+                "sampled_raw_dihedrals": sampled_raw_dihedrals,
                 "sampled_aligned_dihedrals": sampled_aligned_dihedrals,
+                "sampled_pdb_coords": sampled_pdb_coords,
                 "original_recomputed_dihedrals": original_recomputed_dihedrals,
                 "dihedral_diff_rad": dihedral_diff_rad,
                 "dihedral_abs_error_deg": dihedral_abs_error_deg,
@@ -1605,6 +1803,7 @@ def main() -> None:
         report_path,
         metrics,
         sampled_cif_path,
+        sampled_pdb_path,
         target_cif_path,
         arrays_path,
         atom_csv_path,
@@ -1616,6 +1815,7 @@ def main() -> None:
     print(f"Wrote metrics: {metrics_path}")
     print(f"Wrote arrays:  {arrays_path}")
     print(f"Wrote sampled CIF: {sampled_cif_path}")
+    print(f"Wrote sampled PDB: {sampled_pdb_path}")
     print(f"Wrote target CIF:  {target_cif_path}")
     print(f"Wrote atom RMSD CSV: {atom_csv_path}")
     if original_dihedrals is not None:

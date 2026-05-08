@@ -80,15 +80,13 @@ bash scripts/run_conditioned_eval_samples.sh
 
 that runs the above N times for active/inactive/pas
 
+NOT NEEDED ANYMORE
 Then to convert ALL sampled prot from cif to pdb:
-
 python scripts/convert_conditioned_eval_cifs_to_pdb.py --base-path /storage_common/nobilm/backmapping_pots_model/results
 
 then:
-python scripts/assign_conditioned_eval_sample_clusters.py \
-  --base-path /storage_common/nobilm/backmapping_pots_model/results
+python scripts/assign_conditioned_eval_sample_clusters.py --base-path /storage_common/nobilm/backmapping_pots_model/results_v2
 
-
-python plot_evaluation.py --base_path /storage_common/nobilm/backmapping_pots_model/results --out_dir /storage_common/nobilm/backmapping_pots_model/results
+python plot_evaluation.py --base_path /storage_common/nobilm/backmapping_pots_model/results_v2 --out_dir /storage_common/nobilm/backmapping_pots_model/results_v2
 
 
