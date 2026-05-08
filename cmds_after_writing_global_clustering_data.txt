@@ -60,3 +60,35 @@ CUDA_VISIBLE_DEVICES=0 \
   '~model.scheduler.max_lr' \
   '~model.scheduler.warmup_steps' \
   trainer.max_steps=600000
+
+
+
+
+########
+then after finetuning for sampling either use:
+
+for a single structure:
+python scripts/evaluate_active_npz_conditioned_sample.py \
+--seed 123 \
+--checkpoint-path /storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/ft_merged_npz_from_simplefold100M/checkpoints/last.ckpt \
+--raw-npz-path /home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/active_without_hs.npz \
+--output-dir /storage_common/nobilm/backmapping_pots_model/results/active_samples
+
+for multiple structures:
+
+bash scripts/run_conditioned_eval_samples.sh
+
+that runs the above N times for active/inactive/pas
+
+Then to convert ALL sampled prot from cif to pdb:
+
+python scripts/convert_conditioned_eval_cifs_to_pdb.py --base-path /storage_common/nobilm/backmapping_pots_model/results
+
+then:
+python scripts/assign_conditioned_eval_sample_clusters.py \
+  --base-path /storage_common/nobilm/backmapping_pots_model/results
+
+
+python plot_evaluation.py --base_path /storage_common/nobilm/backmapping_pots_model/results --out_dir /storage_common/nobilm/backmapping_pots_model/results
+
+

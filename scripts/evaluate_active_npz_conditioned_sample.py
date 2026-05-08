@@ -1,5 +1,105 @@
 #!/usr/bin/env python3
-"""Evaluate one cluster-conditioned SimpleFold sample against an NPZ frame."""
+"""Evaluate one cluster-conditioned SimpleFold sample against an NPZ frame.
+
+Command-line usage:
+
+    python scripts/evaluate_active_npz_conditioned_sample.py [options]
+
+Common examples:
+
+    # Evaluate a deterministic frame/sample pair with the default dataset and checkpoint.
+    python scripts/evaluate_active_npz_conditioned_sample.py --frame-index 0 --seed 123
+
+    # Use explicit raw and processed inputs.
+    python scripts/evaluate_active_npz_conditioned_sample.py \
+        --raw-npz-path /path/to/trajectory.npz \
+        --processed-dir /path/to/processed_simplefold_dir \
+        --checkpoint-path /path/to/last.ckpt \
+        --frame-index 10 \
+        --seed 123
+
+Input and output arguments:
+
+    --data-path PATH
+        Raw trajectory NPZ or processed SimpleFold directory. Defaults to
+        /scratch/nobilm/quantum_backmapping/training_data_active_npz.
+
+    --raw-npz-path PATH
+        Raw trajectory NPZ containing trajectory, dihedrals,
+        dihedral_atom_indices, dihedral_mask, and
+        atom_idx_and_glob_cluster_id_per_frame. Only needed when auto-discovery
+        cannot find the raw NPZ.
+
+    --processed-dir PATH
+        Processed SimpleFold directory containing structures/, records/, and
+        optionally tokens/. Defaults to --data-path when --data-path is a
+        directory.
+
+    --output-dir PATH
+        Directory where reports, metrics JSON, detailed NPZ arrays, CSV files,
+        histogram files, and mmCIF structures are written. Defaults to
+        artifacts/active_npz_conditioned_eval under the repo root.
+
+Checkpoint and model arguments:
+
+    --checkpoint-dir PATH
+        Directory containing last.ckpt. Used when --checkpoint-path is omitted.
+
+    --checkpoint-path PATH
+        Exact checkpoint to load. Overrides --checkpoint-dir/last.ckpt.
+
+    --architecture-config PATH
+        Hydra YAML config used to instantiate the FoldingDiT architecture.
+        Defaults to configs/model/architecture/foldingdit_100M.yaml.
+
+    --esm-model NAME
+        ESM model registry name used to compute ESM features. Defaults to
+        esm2_3B.
+
+    --use-non-ema-weights
+        Prefer checkpoint weights with the model. prefix instead of the default
+        model_ema.module. prefix.
+
+    --no-mmap-checkpoint
+        Disable torch.load(..., mmap=True) when loading the checkpoint.
+
+Sampling and reproducibility arguments:
+
+    --frame-index INT
+        Trajectory frame index to evaluate. If omitted, one frame is selected
+        randomly from the raw NPZ or processed manifest.
+
+    --seed INT
+        Random seed for frame selection, Torch sampling noise, and CUDA sampling
+        seeds when CUDA is available.
+
+    --device DEVICE
+        Torch device such as cpu, cuda, or cuda:0. If omitted, the script uses
+        the visible CUDA device with the most free memory, otherwise CPU.
+
+    --num-steps INT
+        Number of Euler-Maruyama sampling steps. Defaults to 500.
+
+    --tau FLOAT
+        EMSampler tau value. Defaults to 0.3.
+
+    --scale FLOAT
+        Coordinate scale passed to ProteinDataProcessor. Defaults to 16.0.
+
+    --ref-scale FLOAT
+        Reference-position scale passed to ProteinDataProcessor. Defaults to
+        5.0.
+
+Dihedral histogram arguments:
+
+    --dihedral-angle-bins INT
+        Number of bins for original/sample dihedral angle histograms in degrees.
+        Defaults to 72.
+
+    --dihedral-error-bins INT
+        Number of bins for signed/absolute dihedral error histograms in degrees.
+        Defaults to 72.
+"""
 
 from __future__ import annotations
 
