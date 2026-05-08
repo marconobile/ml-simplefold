@@ -18,6 +18,13 @@ Common examples:
         --frame-index 10 \
         --seed 123
 
+    # Generate one sample for each row of an external labels NPZ.
+    python scripts/evaluate_active_npz_conditioned_sample.py \
+        --raw-npz-path /path/to/template_topology.npz \
+        --labels-npz-path /path/to/labels.npz \
+        --checkpoint-path /path/to/last.ckpt \
+        --output-dir /path/to/output
+
 Input and output arguments:
 
     --data-path PATH
@@ -29,6 +36,12 @@ Input and output arguments:
         dihedral_atom_indices, dihedral_mask, and
         atom_idx_and_glob_cluster_id_per_frame. Only needed when auto-discovery
         cannot find the raw NPZ.
+
+    --labels-npz-path PATH
+        Optional NPZ containing atom_idx_and_glob_cluster_id_per_frame with
+        shape (n_samples, n_atoms_with_global_clusters). When provided, each
+        row is used as conditioning labels for one generated sample, and
+        original-structure coordinate/dihedral evaluation is skipped.
 
     --processed-dir PATH
         Processed SimpleFold directory containing structures/, records/, and
@@ -166,7 +179,9 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Sample one random trajectory frame with the fine-tuned SimpleFold "
             "checkpoint, conditioning on the frame's original atom cluster labels, "
-            "then compare sampled coordinates and dihedrals to the original frame."
+            "then compare sampled coordinates and dihedrals to the original frame. "
+            "With --labels-npz-path, generate one sample per provided label row "
+            "and skip original-frame evaluation."
         )
     )
     parser.add_argument(
@@ -187,6 +202,17 @@ def parse_args() -> argparse.Namespace:
             "Raw trajectory NPZ containing `trajectory`, `dihedrals`, and cluster labels. "
             "Required only when --data-path points to a processed SimpleFold directory "
             "and auto-discovery does not find the raw NPZ."
+        ),
+    )
+    parser.add_argument(
+        "--labels-npz-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional NPZ containing `atom_idx_and_glob_cluster_id_per_frame` "
+            "with shape (n_samples, n_atoms_with_global_clusters). When provided, "
+            "one conditioned sample is generated for each row and original-structure "
+            "coordinate/dihedral evaluation is skipped."
         ),
     )
     parser.add_argument(
@@ -337,6 +363,35 @@ def resolve_raw_npz_path(data_path: Path, raw_npz_path: Path | None) -> Path | N
         if candidate.exists() and candidate.is_file():
             return candidate.resolve()
     return None
+
+
+def resolve_labels_npz_path(labels_npz_path: Path | None) -> Path | None:
+    if labels_npz_path is None:
+        return None
+    labels_npz_path = labels_npz_path.expanduser().resolve()
+    if not labels_npz_path.exists():
+        raise FileNotFoundError(f"Labels NPZ not found: {labels_npz_path}")
+    return labels_npz_path
+
+
+def load_conditioning_label_rows(labels_npz_path: Path) -> np.ndarray:
+    with np.load(labels_npz_path, allow_pickle=False) as data:
+        if CLUSTER_KEY not in data.files:
+            raise KeyError(f"Labels NPZ is missing required key `{CLUSTER_KEY}`.")
+        label_rows = np.asarray(data[CLUSTER_KEY], dtype=np.int64)
+
+    if label_rows.ndim != 2:
+        raise ValueError(
+            f"`{CLUSTER_KEY}` in --labels-npz-path must have shape "
+            f"(n_samples, n_atoms_with_global_clusters), got {label_rows.shape}."
+        )
+    if label_rows.shape[0] == 0:
+        raise ValueError("--labels-npz-path contains zero label rows.")
+    if label_rows.shape[1] == 0:
+        raise ValueError("--labels-npz-path contains zero labels per row.")
+    if label_rows.min(initial=0) < -1:
+        raise ValueError(f"`{CLUSTER_KEY}` in --labels-npz-path contains labels below -1.")
+    return label_rows
 
 
 def resolve_processed_dir(data_path: Path, processed_dir: Path | None) -> Path | None:
@@ -645,6 +700,75 @@ def build_structure_and_record_from_raw(frame_data: dict[str, Any]) -> tuple[Str
     return structure, asdict(record)
 
 
+def pad_cluster_labels(
+    cluster_labels: np.ndarray | torch.Tensor,
+    num_model_atoms: int,
+    *,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    if isinstance(cluster_labels, torch.Tensor):
+        labels_tensor = cluster_labels.detach().to(dtype=torch.long, device=device)
+    else:
+        labels_tensor = torch.as_tensor(
+            np.asarray(cluster_labels, dtype=np.int64),
+            dtype=torch.long,
+            device=device,
+        )
+
+    if labels_tensor.ndim != 1:
+        raise ValueError(
+            f"Conditioning labels must be one-dimensional per sample, got "
+            f"{tuple(labels_tensor.shape)}."
+        )
+    if labels_tensor.shape[0] > num_model_atoms:
+        raise ValueError(
+            f"Conditioning labels have {labels_tensor.shape[0]} atoms, but the "
+            f"featurized model input has only {num_model_atoms} atoms."
+        )
+    if labels_tensor.numel() > 0 and int(labels_tensor.min().item()) < -1:
+        raise ValueError("Conditioning labels contain labels below -1.")
+
+    padded_cluster_labels = torch.full(
+        (num_model_atoms,),
+        -1,
+        dtype=torch.long,
+        device=device,
+    )
+    padded_cluster_labels[: labels_tensor.shape[0]] = labels_tensor
+    return padded_cluster_labels
+
+
+def set_batch_cluster_labels(batch: dict[str, Any], cluster_labels: np.ndarray) -> None:
+    num_model_atoms = int(batch["coords"].shape[1])
+    batch_size = int(batch["coords"].shape[0])
+    if batch_size != 1:
+        raise ValueError(f"Expected a single-structure batch, got batch size {batch_size}.")
+    padded_cluster_labels = pad_cluster_labels(
+        cluster_labels,
+        num_model_atoms,
+        device=batch["coords"].device,
+    )
+    batch[CLUSTER_KEY] = padded_cluster_labels.unsqueeze(0)
+
+
+def validate_cluster_labels_for_model(
+    cluster_labels: np.ndarray,
+    model: torch.nn.Module,
+) -> None:
+    non_padding = cluster_labels[cluster_labels >= 0]
+    if non_padding.size == 0:
+        return
+    max_supported = getattr(model, "max_possible_global_clu_idx", None)
+    if max_supported is None:
+        return
+    max_label = int(non_padding.max())
+    if max_label > int(max_supported):
+        raise ValueError(
+            f"Conditioning label {max_label} exceeds the model-supported maximum "
+            f"global cluster id {int(max_supported)}."
+        )
+
+
 def prepare_conditioned_batch(
     frame_data: dict[str, Any],
     processed_dir: Path | None,
@@ -681,16 +805,11 @@ def prepare_conditioned_batch(
     features["num_repeats"] = torch.tensor(1)
     features["max_num_tokens"] = torch.tensor(len(tokenized.tokens), dtype=torch.long)
     features["cropped_num_tokens"] = torch.tensor(len(tokenized.tokens), dtype=torch.long)
-    cluster_labels = torch.as_tensor(frame_data["original_cluster_labels"], dtype=torch.long)
     num_model_atoms = int(features["ref_pos"].shape[0])
-    if cluster_labels.shape[0] > num_model_atoms:
-        raise ValueError(
-            f"Cluster labels have {cluster_labels.shape[0]} atoms, but the featurized "
-            f"model input has only {num_model_atoms} atoms."
-        )
-    padded_cluster_labels = torch.full((num_model_atoms,), -1, dtype=torch.long)
-    padded_cluster_labels[: cluster_labels.shape[0]] = cluster_labels
-    features[CLUSTER_KEY] = padded_cluster_labels
+    features[CLUSTER_KEY] = pad_cluster_labels(
+        frame_data["original_cluster_labels"],
+        num_model_atoms,
+    )
 
     batch = collate([features])
     batch = processor.preprocess_inference(
@@ -855,11 +974,16 @@ def ensure_conditioned_eval_sampled_pdb(
     sampled_cif_path: Path,
     configured_base_path: Path,
     output_dir: Path,
+    current_file_only: bool = False,
 ) -> Path:
     sampled_pdb_path = conditioned_eval_sampled_pdb_path(sampled_cif_path)
-    converter_base_path = resolve_conditioned_eval_converter_base_path(
-        configured_base_path,
-        output_dir,
+    converter_base_path = (
+        sampled_cif_path
+        if current_file_only
+        else resolve_conditioned_eval_converter_base_path(
+            configured_base_path,
+            output_dir,
+        )
     )
 
     try:
@@ -1313,17 +1437,18 @@ def write_report(
     metrics: dict[str, Any],
     sampled_cif_path: Path,
     sampled_pdb_path: Path | None,
-    target_cif_path: Path,
+    target_cif_path: Path | None,
     arrays_path: Path,
-    atom_csv_path: Path,
+    atom_csv_path: Path | None,
     dihedral_csv_path: Path | None,
     raw_sampled_cif_path: Path | None = None,
 ) -> None:
     dihedrals = metrics.get("dihedrals") or {}
+    sample_header = "Template sample" if metrics.get("labels_npz_path") else "Selected sample"
     lines = [
         "SimpleFold conditioned sampling evaluation",
         "",
-        "Selected sample",
+        sample_header,
         f"  record_id: {metrics['record_id']}",
         f"  raw_record_id: {metrics.get('raw_record_id')}",
         f"  sample_id: {metrics['sample_id']}",
@@ -1333,25 +1458,50 @@ def write_report(
         "",
         "Inputs",
         f"  raw_npz_path: {metrics['raw_npz_path']}",
+        f"  labels_npz_path: {metrics.get('labels_npz_path')}",
         f"  processed_dir: {metrics['processed_dir']}",
         f"  checkpoint_path: {metrics['checkpoint_path']}",
         f"  seed: {metrics['seed']}",
         f"  sampler: EMSampler, num_steps={metrics['num_steps']}, tau={metrics['tau']}",
-        "",
-        "Coordinate comparison after Kabsch alignment",
-        f"  global_rmsd_A: {metrics['global_rmsd']:.6f}",
-        f"  atomwise_rmsd_mean_A: {metrics['atomwise_rmsd_mean']:.6f}",
-        f"  atomwise_rmsd_median_A: {metrics['atomwise_rmsd_median']:.6f}",
-        f"  atomwise_rmsd_max_A: {metrics['atomwise_rmsd_max']:.6f}",
-        "",
-        "Dihedral comparison",
-        f"  compared_angles: {dihedrals.get('count', 'n/a')}",
-        f"  mae_deg: {format_optional_float(dihedrals.get('mae_deg'))}",
-        f"  rmse_deg: {format_optional_float(dihedrals.get('rmse_deg'))}",
-        f"  max_abs_error_deg: {format_optional_float(dihedrals.get('max_abs_error_deg'))}",
-        "  stored_vs_recomputed_original_mae_deg: "
-        f"{format_optional_float(dihedrals.get('stored_vs_recomputed_original_mae_deg'))}",
     ]
+    if metrics.get("label_sample_index") is not None:
+        lines.append(f"  label_sample_index: {metrics['label_sample_index']}")
+
+    if metrics.get("global_rmsd") is not None:
+        lines.extend(
+            [
+                "",
+                "Coordinate comparison after Kabsch alignment",
+                f"  global_rmsd_A: {metrics['global_rmsd']:.6f}",
+                f"  atomwise_rmsd_mean_A: {metrics['atomwise_rmsd_mean']:.6f}",
+                f"  atomwise_rmsd_median_A: {metrics['atomwise_rmsd_median']:.6f}",
+                f"  atomwise_rmsd_max_A: {metrics['atomwise_rmsd_max']:.6f}",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "Coordinate comparison",
+                "  skipped: no original structure was used for this labels-NPZ sample",
+            ]
+        )
+
+    lines.extend(["", "Dihedral comparison"])
+    if dihedrals:
+        lines.extend(
+            [
+                f"  compared_angles: {dihedrals.get('count', 'n/a')}",
+                f"  mae_deg: {format_optional_float(dihedrals.get('mae_deg'))}",
+                f"  rmse_deg: {format_optional_float(dihedrals.get('rmse_deg'))}",
+                f"  max_abs_error_deg: {format_optional_float(dihedrals.get('max_abs_error_deg'))}",
+                "  stored_vs_recomputed_original_mae_deg: "
+                f"{format_optional_float(dihedrals.get('stored_vs_recomputed_original_mae_deg'))}",
+            ]
+        )
+    else:
+        lines.append("  skipped: no original structure dihedrals were evaluated")
+
     if dihedrals.get("sampled_dihedral_source") is not None:
         lines.append(f"  sampled_dihedral_source: {dihedrals.get('sampled_dihedral_source')}")
     if dihedrals.get("sampled_pdb_path") is not None:
@@ -1427,12 +1577,14 @@ def write_report(
         [
             "",
             "Main artifacts",
-            f"  sampled_model_cif_aligned_for_rmsd: {sampled_cif_path}",
-            f"  target_reference_cif: {target_cif_path}",
+            f"  sampled_model_cif: {sampled_cif_path}",
             f"  detailed_arrays_npz: {arrays_path}",
-            f"  atomwise_rmsd_csv: {atom_csv_path}",
         ]
     )
+    if target_cif_path is not None:
+        lines.append(f"  target_reference_cif: {target_cif_path}")
+    if atom_csv_path is not None:
+        lines.append(f"  atomwise_rmsd_csv: {atom_csv_path}")
     if sampled_pdb_path is not None:
         lines.append(f"  sampled_model_pdb_for_dihedrals: {sampled_pdb_path}")
     if raw_sampled_cif_path is not None:
@@ -1441,6 +1593,381 @@ def write_report(
         lines.append(f"  dihedral_csv: {dihedral_csv_path}")
 
     path.write_text("\n".join(lines) + "\n")
+
+
+def output_stem_for_sample(record_id: str, label_sample_index: int | None) -> str:
+    if label_sample_index is None:
+        return f"{record_id}_conditioned_eval"
+    return f"{record_id}_labels_{label_sample_index:06d}_conditioned_eval"
+
+
+def sample_conditioned_structure(
+    *,
+    args: argparse.Namespace,
+    frame_data: dict[str, Any],
+    raw_npz_path: Path | None,
+    labels_npz_path: Path | None,
+    processed_dir: Path | None,
+    checkpoint_path: Path,
+    model: torch.nn.Module,
+    flow: LinearPath,
+    sampler: EMSampler,
+    processor: ProteinDataProcessor,
+    batch: dict[str, Any],
+    structure: Structure,
+    record: Record,
+    conditioning_cluster_labels: np.ndarray,
+    label_sample_index: int | None,
+    evaluate_against_original: bool,
+) -> dict[str, Any]:
+    conditioning_cluster_labels = np.asarray(
+        conditioning_cluster_labels,
+        dtype=np.int64,
+    ).copy()
+    validate_cluster_labels_for_model(conditioning_cluster_labels, model)
+    set_batch_cluster_labels(batch, conditioning_cluster_labels)
+
+    template_coords = frame_data["original_coords"]
+    print(
+        "Sampling conditioned structure"
+        + (
+            ""
+            if label_sample_index is None
+            else f" for labels row {label_sample_index + 1}"
+        )
+        + f" with label range {int(conditioning_cluster_labels.min())}.."
+        f"{int(conditioning_cluster_labels.max())}"
+    )
+
+    with torch.no_grad():
+        noise = torch.randn_like(batch["coords"])
+        out_dict = sampler.sample(model, flow, noise, batch)
+        out_dict = processor.postprocess(out_dict, batch)
+        sampled_coords_full_tensor = out_dict["denoised_coords"][0].detach().cpu()
+        atom_mask_full_tensor = batch["atom_pad_mask"][0].detach().cpu()
+        sampled_coords_full = sampled_coords_full_tensor.numpy().astype(np.float32)
+        atom_mask_full = atom_mask_full_tensor.numpy().astype(bool)
+        sampled_coords = sampled_coords_full[atom_mask_full]
+
+    if sampled_coords.shape != template_coords.shape:
+        raise ValueError(
+            f"Unpadded sampled coordinates have shape {sampled_coords.shape}, "
+            f"but the template structure has shape {template_coords.shape}."
+        )
+
+    global_rmsd = None
+    atomwise_rmsd = None
+    aligned_sampled_coords = None
+    atom_mask = None
+    target_cif_path = None
+    raw_sampled_cif_path = None
+    atom_csv_path = None
+    original_dihedrals = None
+    selected_sample = None
+
+    if evaluate_against_original:
+        original_coords = frame_data["original_coords"]
+        selected_sample = frame_data["selected_sample"]
+        original_dihedrals = frame_data["original_dihedrals"]
+        atom_mask = np.ones(original_coords.shape[0], dtype=bool)
+        aligned_sampled_coords, global_rmsd, atomwise_rmsd = kabsch_align(
+            sampled_coords,
+            original_coords,
+            atom_mask,
+        )
+        print(f"Aligned RMSD: {global_rmsd:.4f} A")
+        sampled_output_coord = torch.as_tensor(
+            aligned_sampled_coords,
+            dtype=torch.float32,
+        )
+        sampled_output_mask = torch.ones(
+            aligned_sampled_coords.shape[0],
+            dtype=torch.bool,
+        )
+    else:
+        original_coords = None
+        print(
+            "Skipping coordinate and dihedral comparison because --labels-npz-path "
+            "samples do not have an original structure target."
+        )
+        sampled_output_coord = sampled_coords_full_tensor
+        sampled_output_mask = atom_mask_full_tensor
+
+    dihedral_summary = None
+    sampled_dihedrals = None
+    sampled_raw_dihedrals = None
+    sampled_aligned_dihedrals = None
+    original_recomputed_dihedrals = None
+    dihedral_diff_rad = None
+    dihedral_abs_error_deg = None
+    sampled_pdb_coords = None
+
+    output_stem = output_stem_for_sample(
+        frame_data["record_id"],
+        label_sample_index,
+    )
+    metrics_path = args.output_dir / f"{output_stem}.json"
+    arrays_path = args.output_dir / f"{output_stem}.npz"
+    sampled_cif_path = args.output_dir / f"{output_stem}_sampled.cif"
+    report_path = args.output_dir / f"{output_stem}_report.txt"
+    dihedral_csv_path = None
+    dihedral_histogram_artifacts = None
+
+    if evaluate_against_original:
+        atom_csv_path = args.output_dir / f"{output_stem}_atomwise_rmsd.csv"
+        dihedral_csv_path = args.output_dir / f"{output_stem}_dihedrals.csv"
+        raw_sampled_cif_path = args.output_dir / f"{output_stem}_sampled_raw.cif"
+        target_cif_path = args.output_dir / f"{output_stem}_target_reference.cif"
+
+    sampled_structure = process_structure(
+        deepcopy(structure),
+        sampled_output_coord,
+        sampled_output_mask,
+        record,
+    )
+    save_structure(
+        sampled_structure,
+        args.output_dir,
+        f"{output_stem}_sampled",
+        output_format="mmcif",
+    )
+
+    if evaluate_against_original:
+        raw_sampled_structure = process_structure(
+            deepcopy(structure),
+            sampled_coords_full_tensor,
+            atom_mask_full_tensor,
+            record,
+        )
+        save_structure(
+            raw_sampled_structure,
+            args.output_dir,
+            f"{output_stem}_sampled_raw",
+            output_format="mmcif",
+        )
+        target_structure = process_structure(
+            deepcopy(structure),
+            torch.as_tensor(original_coords, dtype=torch.float32),
+            torch.ones(original_coords.shape[0], dtype=torch.bool),
+            record,
+        )
+        save_structure(
+            target_structure,
+            args.output_dir,
+            f"{output_stem}_target_reference",
+            output_format="mmcif",
+        )
+
+    sampled_pdb_path = ensure_conditioned_eval_sampled_pdb(
+        sampled_cif_path=sampled_cif_path,
+        configured_base_path=args.conditioned_eval_pdb_base_path,
+        output_dir=args.output_dir,
+        current_file_only=labels_npz_path is not None,
+    )
+
+    if evaluate_against_original and original_dihedrals is not None:
+        sampled_pdb_coords = load_sampled_pdb_dihedral_coords(
+            sampled_pdb_path,
+            expected_shape=original_coords.shape,
+        )
+        sampled_dihedrals = compute_dihedral_angles(
+            sampled_pdb_coords,
+            frame_data["dihedral_atom_indices"],
+            frame_data["dihedral_mask"],
+        )
+        sampled_raw_dihedrals = compute_dihedral_angles(
+            sampled_coords,
+            frame_data["dihedral_atom_indices"],
+            frame_data["dihedral_mask"],
+        )
+        sampled_aligned_dihedrals = compute_dihedral_angles(
+            aligned_sampled_coords,
+            frame_data["dihedral_atom_indices"],
+            frame_data["dihedral_mask"],
+        )
+        original_recomputed_dihedrals = compute_dihedral_angles(
+            selected_sample,
+            frame_data["dihedral_atom_indices"],
+            frame_data["dihedral_mask"],
+        )
+        dihedral_summary, dihedral_diff_rad, dihedral_abs_error_deg = summarize_dihedrals(
+            original_dihedrals=original_dihedrals,
+            sampled_dihedrals=sampled_dihedrals,
+            original_recomputed_dihedrals=original_recomputed_dihedrals,
+            dihedral_mask=frame_data["dihedral_mask"],
+            dihedral_keys=frame_data["dihedral_keys"],
+        )
+        dihedral_summary["sampled_dihedral_source"] = "converted_conditioned_eval_sampled_pdb"
+        dihedral_summary["sampled_pdb_path"] = str(sampled_pdb_path)
+        add_dihedral_validation_summary(
+            dihedral_summary,
+            "sampled_raw_vs_pdb",
+            sampled_raw_dihedrals,
+            sampled_dihedrals,
+            frame_data["dihedral_mask"],
+        )
+        add_dihedral_validation_summary(
+            dihedral_summary,
+            "sampled_raw_vs_aligned",
+            sampled_raw_dihedrals,
+            sampled_aligned_dihedrals,
+            frame_data["dihedral_mask"],
+        )
+        add_dihedral_validation_summary(
+            dihedral_summary,
+            "sampled_aligned_vs_pdb",
+            sampled_aligned_dihedrals,
+            sampled_dihedrals,
+            frame_data["dihedral_mask"],
+        )
+        print(
+            "Dihedral MAE from converted sampled PDB: "
+            f"{format_optional_float(dihedral_summary['mae_deg'], ' deg')} "
+            f"over {dihedral_summary['count']} angles"
+        )
+    elif evaluate_against_original:
+        print("Skipping dihedral comparison because no raw trajectory dihedrals were available.")
+
+    if evaluate_against_original and original_dihedrals is not None and dihedral_summary is not None:
+        dihedral_histogram_artifacts = write_dihedral_histograms(
+            output_dir=args.output_dir,
+            output_stem=output_stem,
+            original_dihedrals=original_dihedrals,
+            sampled_dihedrals=sampled_dihedrals,
+            dihedral_diff_rad=dihedral_diff_rad,
+            dihedral_mask=frame_data["dihedral_mask"],
+            dihedral_keys=frame_data["dihedral_keys"],
+            angle_bins=args.dihedral_angle_bins,
+            error_bins=args.dihedral_error_bins,
+        )
+        dihedral_summary["histograms"] = dihedral_histogram_artifacts
+
+    metrics = {
+        "raw_npz_path": str(raw_npz_path) if raw_npz_path is not None else None,
+        "labels_npz_path": str(labels_npz_path) if labels_npz_path is not None else None,
+        "processed_dir": str(processed_dir) if processed_dir is not None else None,
+        "checkpoint_path": str(checkpoint_path),
+        "sampled_cif_path": str(sampled_cif_path),
+        "sampled_pdb_path": str(sampled_pdb_path),
+        "raw_sampled_cif_path": (
+            str(raw_sampled_cif_path) if raw_sampled_cif_path is not None else None
+        ),
+        "target_reference_cif_path": (
+            str(target_cif_path) if target_cif_path is not None else None
+        ),
+        "record_id": frame_data["record_id"],
+        "raw_record_id": frame_data.get("raw_record_id"),
+        "sample_id": frame_data["sample_id"],
+        "frame_position": int(frame_data["frame_position"]),
+        "frame_index": int(frame_data["frame_index"]),
+        "label_sample_index": label_sample_index,
+        "seed": args.seed,
+        "num_steps": args.num_steps,
+        "tau": args.tau,
+        "num_atoms": int(sampled_coords.shape[0]),
+        "global_rmsd": global_rmsd,
+        "atomwise_rmsd_mean": (
+            float(np.nanmean(atomwise_rmsd)) if atomwise_rmsd is not None else None
+        ),
+        "atomwise_rmsd_median": (
+            float(np.nanmedian(atomwise_rmsd)) if atomwise_rmsd is not None else None
+        ),
+        "atomwise_rmsd_max": (
+            float(np.nanmax(atomwise_rmsd)) if atomwise_rmsd is not None else None
+        ),
+        "dihedrals": dihedral_summary,
+    }
+    metrics_path.write_text(json.dumps(metrics, indent=2))
+
+    arrays = {
+        "sampled_coords": sampled_coords,
+        "sampled_coords_full": sampled_coords_full,
+        "model_atom_pad_mask": atom_mask_full,
+        "conditioning_cluster_labels": conditioning_cluster_labels,
+        "frame_position": np.asarray(frame_data["frame_position"], dtype=np.int64),
+        "frame_index": np.asarray(frame_data["frame_index"], dtype=np.int64),
+    }
+    if evaluate_against_original:
+        arrays.update(
+            {
+                "original_coords": original_coords,
+                "selected_sample": selected_sample,
+                "aligned_sampled_coords": aligned_sampled_coords,
+                "atomwise_rmsd": atomwise_rmsd,
+                "atom_mask": atom_mask,
+                "original_cluster_labels": frame_data["original_cluster_labels"],
+            }
+        )
+    if original_dihedrals is not None and dihedral_summary is not None:
+        arrays.update(
+            {
+                "original_dihedrals": original_dihedrals,
+                "sampled_dihedrals": sampled_dihedrals,
+                "sampled_raw_dihedrals": sampled_raw_dihedrals,
+                "sampled_aligned_dihedrals": sampled_aligned_dihedrals,
+                "sampled_pdb_coords": sampled_pdb_coords,
+                "original_recomputed_dihedrals": original_recomputed_dihedrals,
+                "dihedral_diff_rad": dihedral_diff_rad,
+                "dihedral_abs_error_deg": dihedral_abs_error_deg,
+                "dihedral_atom_indices": frame_data["dihedral_atom_indices"],
+                "dihedral_mask": frame_data["dihedral_mask"],
+                "dihedral_keys": np.asarray(frame_data["dihedral_keys"]),
+            }
+        )
+    np.savez_compressed(arrays_path, **arrays)
+
+    if evaluate_against_original and atom_csv_path is not None:
+        write_atomwise_csv(
+            atom_csv_path,
+            atomwise_rmsd,
+            frame_data["atom_names"],
+            frame_data["atom_resids"],
+        )
+    if original_dihedrals is not None and dihedral_summary is not None:
+        write_dihedral_csv(
+            dihedral_csv_path,
+            original_dihedrals,
+            sampled_dihedrals,
+            dihedral_diff_rad,
+            frame_data["dihedral_keys"],
+        )
+    else:
+        dihedral_csv_path = None
+
+    write_report(
+        report_path,
+        metrics,
+        sampled_cif_path,
+        sampled_pdb_path,
+        target_cif_path,
+        arrays_path,
+        atom_csv_path,
+        dihedral_csv_path,
+        raw_sampled_cif_path,
+    )
+
+    print(f"Wrote report:  {report_path}")
+    print(f"Wrote metrics: {metrics_path}")
+    print(f"Wrote arrays:  {arrays_path}")
+    print(f"Wrote sampled CIF: {sampled_cif_path}")
+    print(f"Wrote sampled PDB: {sampled_pdb_path}")
+    if target_cif_path is not None:
+        print(f"Wrote target CIF:  {target_cif_path}")
+    if raw_sampled_cif_path is not None:
+        print(f"Wrote raw sampled CIF: {raw_sampled_cif_path}")
+    if atom_csv_path is not None:
+        print(f"Wrote atom RMSD CSV: {atom_csv_path}")
+    if dihedral_csv_path is not None:
+        print(f"Wrote dihedral CSV: {dihedral_csv_path}")
+    if dihedral_histogram_artifacts is not None:
+        print(f"Wrote dihedral angle histogram CSV: {dihedral_histogram_artifacts['angle_histogram_csv']}")
+        print(f"Wrote dihedral error histogram CSV: {dihedral_histogram_artifacts['error_histogram_csv']}")
+        if dihedral_histogram_artifacts["angle_histogram_png"] is not None:
+            print(f"Wrote dihedral angle histogram PNG: {dihedral_histogram_artifacts['angle_histogram_png']}")
+        if dihedral_histogram_artifacts["error_histogram_png"] is not None:
+            print(f"Wrote dihedral error histogram PNG: {dihedral_histogram_artifacts['error_histogram_png']}")
+
+    return metrics
 
 
 def main() -> None:
@@ -1455,6 +1982,7 @@ def main() -> None:
     data_path = args.data_path.expanduser().resolve()
     processed_dir = resolve_processed_dir(data_path, args.processed_dir)
     raw_npz_path = resolve_raw_npz_path(data_path, args.raw_npz_path)
+    labels_npz_path = resolve_labels_npz_path(args.labels_npz_path)
     checkpoint_path = resolve_checkpoint_path(args)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1478,6 +2006,15 @@ def main() -> None:
             "Could not resolve either a raw trajectory NPZ or a processed SimpleFold directory."
         )
 
+    conditioning_label_rows = None
+    if labels_npz_path is not None:
+        print(f"Loading conditioning labels NPZ: {labels_npz_path}")
+        conditioning_label_rows = load_conditioning_label_rows(labels_npz_path)
+        print(
+            f"Loaded {conditioning_label_rows.shape[0]} conditioning label row(s) "
+            f"with {conditioning_label_rows.shape[1]} label(s) each."
+        )
+
     frame_data["raw_record_id"] = frame_data["record_id"]
     frame_data["record_id"] = match_processed_record_id(
         processed_dir,
@@ -1486,20 +2023,22 @@ def main() -> None:
     )
     gc.collect()
 
-    selected_sample = frame_data["selected_sample"]
     original_coords = frame_data["original_coords"]
     original_cluster_labels = frame_data["original_cluster_labels"]
-    original_dihedrals = frame_data["original_dihedrals"]
 
+    frame_log_label = (
+        "Template frame" if conditioning_label_rows is not None else "Selected frame"
+    )
     print(
-        "Selected frame "
+        f"{frame_log_label} "
         f"position={frame_data['frame_position']} frame_index={frame_data['frame_index']} "
         f"record_id={frame_data['record_id']} atoms={original_coords.shape[0]}"
     )
-    print(
-        "Cluster label range: "
-        f"{int(original_cluster_labels.min())}..{int(original_cluster_labels.max())}"
-    )
+    if conditioning_label_rows is None:
+        print(
+            "Cluster label range: "
+            f"{int(original_cluster_labels.min())}..{int(original_cluster_labels.max())}"
+        )
 
     device = resolve_device(args.device)
     print(f"Using device: {device}")
@@ -1562,271 +2101,53 @@ def main() -> None:
         w_cutoff=0.99,
     )
 
-    print("Sampling conditioned structure with EMSampler")
-    with torch.no_grad():
-        noise = torch.randn_like(batch["coords"], device=device)
-        out_dict = sampler.sample(model, flow, noise, batch)
-        out_dict = processor.postprocess(out_dict, batch)
-        sampled_coords_full_tensor = out_dict["denoised_coords"][0].detach().cpu()
-        atom_mask_full_tensor = batch["atom_pad_mask"][0].detach().cpu()
-        sampled_coords_full = sampled_coords_full_tensor.numpy().astype(np.float32)
-        atom_mask_full = atom_mask_full_tensor.numpy().astype(bool)
-        sampled_coords = sampled_coords_full[atom_mask_full]
-
-    if sampled_coords.shape != original_coords.shape:
-        raise ValueError(
-            f"Unpadded sampled coordinates have shape {sampled_coords.shape}, "
-            f"but original frame has shape {original_coords.shape}."
+    if conditioning_label_rows is None:
+        sample_conditioned_structure(
+            args=args,
+            frame_data=frame_data,
+            raw_npz_path=raw_npz_path,
+            labels_npz_path=None,
+            processed_dir=processed_dir,
+            checkpoint_path=checkpoint_path,
+            model=model,
+            flow=flow,
+            sampler=sampler,
+            processor=processor,
+            batch=batch,
+            structure=structure,
+            record=record,
+            conditioning_cluster_labels=frame_data["original_cluster_labels"],
+            label_sample_index=None,
+            evaluate_against_original=True,
         )
-    atom_mask = np.ones(original_coords.shape[0], dtype=bool)
+        return
 
-    aligned_sampled_coords, global_rmsd, atomwise_rmsd = kabsch_align(
-        sampled_coords,
-        original_coords,
-        atom_mask,
+    print(
+        "Running labels-NPZ sampling mode: generating "
+        f"{conditioning_label_rows.shape[0]} sample(s) and skipping original-structure "
+        "coordinate/dihedral evaluation."
     )
-    print(f"Aligned RMSD: {global_rmsd:.4f} A")
-
-    dihedral_summary = None
-    sampled_dihedrals = None
-    sampled_raw_dihedrals = None
-    sampled_aligned_dihedrals = None
-    original_recomputed_dihedrals = None
-    dihedral_diff_rad = None
-    dihedral_abs_error_deg = None
-    sampled_pdb_coords = None
-
-    output_stem = f"{frame_data['record_id']}_conditioned_eval"
-    metrics_path = args.output_dir / f"{output_stem}.json"
-    arrays_path = args.output_dir / f"{output_stem}.npz"
-    atom_csv_path = args.output_dir / f"{output_stem}_atomwise_rmsd.csv"
-    dihedral_csv_path = args.output_dir / f"{output_stem}_dihedrals.csv"
-    sampled_cif_path = args.output_dir / f"{output_stem}_sampled.cif"
-    raw_sampled_cif_path = args.output_dir / f"{output_stem}_sampled_raw.cif"
-    target_cif_path = args.output_dir / f"{output_stem}_target_reference.cif"
-    report_path = args.output_dir / f"{output_stem}_report.txt"
-    dihedral_histogram_artifacts = None
-
-    sampled_structure = process_structure(
-        deepcopy(structure),
-        torch.as_tensor(aligned_sampled_coords, dtype=torch.float32),
-        torch.ones(aligned_sampled_coords.shape[0], dtype=torch.bool),
-        record,
-    )
-    save_structure(
-        sampled_structure,
-        args.output_dir,
-        f"{output_stem}_sampled",
-        output_format="mmcif",
-    )
-    raw_sampled_structure = process_structure(
-        deepcopy(structure),
-        sampled_coords_full_tensor,
-        atom_mask_full_tensor,
-        record,
-    )
-    save_structure(
-        raw_sampled_structure,
-        args.output_dir,
-        f"{output_stem}_sampled_raw",
-        output_format="mmcif",
-    )
-    target_structure = process_structure(
-        deepcopy(structure),
-        torch.as_tensor(original_coords, dtype=torch.float32),
-        torch.ones(original_coords.shape[0], dtype=torch.bool),
-        record,
-    )
-    save_structure(
-        target_structure,
-        args.output_dir,
-        f"{output_stem}_target_reference",
-        output_format="mmcif",
-    )
-
-    sampled_pdb_path = ensure_conditioned_eval_sampled_pdb(
-        sampled_cif_path=sampled_cif_path,
-        configured_base_path=args.conditioned_eval_pdb_base_path,
-        output_dir=args.output_dir,
-    )
-
-    if original_dihedrals is not None:
-        sampled_pdb_coords = load_sampled_pdb_dihedral_coords(
-            sampled_pdb_path,
-            expected_shape=original_coords.shape,
+    for label_sample_index, conditioning_cluster_labels in enumerate(
+        conditioning_label_rows
+    ):
+        sample_conditioned_structure(
+            args=args,
+            frame_data=frame_data,
+            raw_npz_path=raw_npz_path,
+            labels_npz_path=labels_npz_path,
+            processed_dir=processed_dir,
+            checkpoint_path=checkpoint_path,
+            model=model,
+            flow=flow,
+            sampler=sampler,
+            processor=processor,
+            batch=batch,
+            structure=structure,
+            record=record,
+            conditioning_cluster_labels=conditioning_cluster_labels,
+            label_sample_index=label_sample_index,
+            evaluate_against_original=False,
         )
-        sampled_dihedrals = compute_dihedral_angles(
-            sampled_pdb_coords,
-            frame_data["dihedral_atom_indices"],
-            frame_data["dihedral_mask"],
-        )
-        sampled_raw_dihedrals = compute_dihedral_angles(
-            sampled_coords,
-            frame_data["dihedral_atom_indices"],
-            frame_data["dihedral_mask"],
-        )
-        sampled_aligned_dihedrals = compute_dihedral_angles(
-            aligned_sampled_coords,
-            frame_data["dihedral_atom_indices"],
-            frame_data["dihedral_mask"],
-        )
-        original_recomputed_dihedrals = compute_dihedral_angles(
-            selected_sample,
-            frame_data["dihedral_atom_indices"],
-            frame_data["dihedral_mask"],
-        )
-        dihedral_summary, dihedral_diff_rad, dihedral_abs_error_deg = summarize_dihedrals(
-            original_dihedrals=original_dihedrals,
-            sampled_dihedrals=sampled_dihedrals,
-            original_recomputed_dihedrals=original_recomputed_dihedrals,
-            dihedral_mask=frame_data["dihedral_mask"],
-            dihedral_keys=frame_data["dihedral_keys"],
-        )
-        dihedral_summary["sampled_dihedral_source"] = "converted_conditioned_eval_sampled_pdb"
-        dihedral_summary["sampled_pdb_path"] = str(sampled_pdb_path)
-        add_dihedral_validation_summary(
-            dihedral_summary,
-            "sampled_raw_vs_pdb",
-            sampled_raw_dihedrals,
-            sampled_dihedrals,
-            frame_data["dihedral_mask"],
-        )
-        add_dihedral_validation_summary(
-            dihedral_summary,
-            "sampled_raw_vs_aligned",
-            sampled_raw_dihedrals,
-            sampled_aligned_dihedrals,
-            frame_data["dihedral_mask"],
-        )
-        add_dihedral_validation_summary(
-            dihedral_summary,
-            "sampled_aligned_vs_pdb",
-            sampled_aligned_dihedrals,
-            sampled_dihedrals,
-            frame_data["dihedral_mask"],
-        )
-        print(
-            "Dihedral MAE from converted sampled PDB: "
-            f"{dihedral_summary['mae_deg']:.4f} deg over {dihedral_summary['count']} angles"
-        )
-    else:
-        print("Skipping dihedral comparison because no raw trajectory dihedrals were available.")
-
-    if original_dihedrals is not None and dihedral_summary is not None:
-        dihedral_histogram_artifacts = write_dihedral_histograms(
-            output_dir=args.output_dir,
-            output_stem=output_stem,
-            original_dihedrals=original_dihedrals,
-            sampled_dihedrals=sampled_dihedrals,
-            dihedral_diff_rad=dihedral_diff_rad,
-            dihedral_mask=frame_data["dihedral_mask"],
-            dihedral_keys=frame_data["dihedral_keys"],
-            angle_bins=args.dihedral_angle_bins,
-            error_bins=args.dihedral_error_bins,
-        )
-        dihedral_summary["histograms"] = dihedral_histogram_artifacts
-
-    metrics = {
-        "raw_npz_path": str(raw_npz_path) if raw_npz_path is not None else None,
-        "processed_dir": str(processed_dir) if processed_dir is not None else None,
-        "checkpoint_path": str(checkpoint_path),
-        "sampled_cif_path": str(sampled_cif_path),
-        "sampled_pdb_path": str(sampled_pdb_path),
-        "raw_sampled_cif_path": str(raw_sampled_cif_path),
-        "target_reference_cif_path": str(target_cif_path),
-        "record_id": frame_data["record_id"],
-        "raw_record_id": frame_data.get("raw_record_id"),
-        "sample_id": frame_data["sample_id"],
-        "frame_position": int(frame_data["frame_position"]),
-        "frame_index": int(frame_data["frame_index"]),
-        "seed": args.seed,
-        "num_steps": args.num_steps,
-        "tau": args.tau,
-        "num_atoms": int(original_coords.shape[0]),
-        "global_rmsd": global_rmsd,
-        "atomwise_rmsd_mean": float(np.nanmean(atomwise_rmsd)),
-        "atomwise_rmsd_median": float(np.nanmedian(atomwise_rmsd)),
-        "atomwise_rmsd_max": float(np.nanmax(atomwise_rmsd)),
-        "dihedrals": dihedral_summary,
-    }
-    metrics_path.write_text(json.dumps(metrics, indent=2))
-
-    arrays = {
-        "original_coords": original_coords,
-        "selected_sample": selected_sample,
-        "sampled_coords": sampled_coords,
-        "sampled_coords_full": sampled_coords_full,
-        "aligned_sampled_coords": aligned_sampled_coords,
-        "atomwise_rmsd": atomwise_rmsd,
-        "atom_mask": atom_mask,
-        "model_atom_pad_mask": atom_mask_full,
-        "original_cluster_labels": original_cluster_labels,
-        "frame_position": np.asarray(frame_data["frame_position"], dtype=np.int64),
-        "frame_index": np.asarray(frame_data["frame_index"], dtype=np.int64),
-    }
-    if original_dihedrals is not None:
-        arrays.update(
-            {
-                "original_dihedrals": original_dihedrals,
-                "sampled_dihedrals": sampled_dihedrals,
-                "sampled_raw_dihedrals": sampled_raw_dihedrals,
-                "sampled_aligned_dihedrals": sampled_aligned_dihedrals,
-                "sampled_pdb_coords": sampled_pdb_coords,
-                "original_recomputed_dihedrals": original_recomputed_dihedrals,
-                "dihedral_diff_rad": dihedral_diff_rad,
-                "dihedral_abs_error_deg": dihedral_abs_error_deg,
-                "dihedral_atom_indices": frame_data["dihedral_atom_indices"],
-                "dihedral_mask": frame_data["dihedral_mask"],
-                "dihedral_keys": np.asarray(frame_data["dihedral_keys"]),
-            }
-        )
-    np.savez_compressed(arrays_path, **arrays)
-
-    write_atomwise_csv(
-        atom_csv_path,
-        atomwise_rmsd,
-        frame_data["atom_names"],
-        frame_data["atom_resids"],
-    )
-    if original_dihedrals is not None:
-        write_dihedral_csv(
-            dihedral_csv_path,
-            original_dihedrals,
-            sampled_dihedrals,
-            dihedral_diff_rad,
-            frame_data["dihedral_keys"],
-        )
-    else:
-        dihedral_csv_path = None
-
-    write_report(
-        report_path,
-        metrics,
-        sampled_cif_path,
-        sampled_pdb_path,
-        target_cif_path,
-        arrays_path,
-        atom_csv_path,
-        dihedral_csv_path,
-        raw_sampled_cif_path,
-    )
-
-    print(f"Wrote report:  {report_path}")
-    print(f"Wrote metrics: {metrics_path}")
-    print(f"Wrote arrays:  {arrays_path}")
-    print(f"Wrote sampled CIF: {sampled_cif_path}")
-    print(f"Wrote sampled PDB: {sampled_pdb_path}")
-    print(f"Wrote target CIF:  {target_cif_path}")
-    print(f"Wrote atom RMSD CSV: {atom_csv_path}")
-    if original_dihedrals is not None:
-        print(f"Wrote dihedral CSV: {dihedral_csv_path}")
-    if dihedral_histogram_artifacts is not None:
-        print(f"Wrote dihedral angle histogram CSV: {dihedral_histogram_artifacts['angle_histogram_csv']}")
-        print(f"Wrote dihedral error histogram CSV: {dihedral_histogram_artifacts['error_histogram_csv']}")
-        if dihedral_histogram_artifacts["angle_histogram_png"] is not None:
-            print(f"Wrote dihedral angle histogram PNG: {dihedral_histogram_artifacts['angle_histogram_png']}")
-        if dihedral_histogram_artifacts["error_histogram_png"] is not None:
-            print(f"Wrote dihedral error histogram PNG: {dihedral_histogram_artifacts['error_histogram_png']}")
 
 
 if __name__ == "__main__":
