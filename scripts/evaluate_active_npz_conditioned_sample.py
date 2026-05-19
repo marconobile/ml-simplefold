@@ -187,7 +187,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-path",
         type=Path,
-        default=DEFAULT_DATA_PATH,
+        default=None,
         help=(
             "Raw trajectory NPZ, or the processed SimpleFold directory. The requested "
             "default is the processed directory at /scratch/nobilm/quantum_backmapping/"
@@ -394,7 +394,17 @@ def load_conditioning_label_rows(labels_npz_path: Path) -> np.ndarray:
     return label_rows
 
 
-def resolve_processed_dir(data_path: Path, processed_dir: Path | None) -> Path | None:
+def resolve_data_path(data_path: Path | None) -> Path:
+    return (data_path or DEFAULT_DATA_PATH).expanduser().resolve()
+
+
+def resolve_processed_dir(
+    data_path: Path,
+    processed_dir: Path | None,
+    *,
+    allow_data_path_dir: bool = True,
+    allow_default_fallback: bool = True,
+) -> Path | None:
     if processed_dir is not None:
         processed_dir = processed_dir.expanduser().resolve()
         if not processed_dir.exists():
@@ -402,9 +412,9 @@ def resolve_processed_dir(data_path: Path, processed_dir: Path | None) -> Path |
         return processed_dir
 
     data_path = data_path.expanduser().resolve()
-    if data_path.is_dir():
+    if allow_data_path_dir and data_path.is_dir():
         return data_path
-    if DEFAULT_DATA_PATH.exists() and DEFAULT_DATA_PATH.is_dir():
+    if allow_default_fallback and DEFAULT_DATA_PATH.exists() and DEFAULT_DATA_PATH.is_dir():
         return DEFAULT_DATA_PATH.resolve()
     return None
 
@@ -485,7 +495,7 @@ def load_raw_frame(
         frame_number = int(frame_indices[frame_position])
 
         sample_id = np_scalar_to_string(data, "sample_id", raw_npz_path.stem)
-        record_prefix = sanitize_record_prefix(sample_id)
+        record_prefix = sanitize_record_prefix(raw_npz_path.stem)
         record_id = f"{record_prefix}_{frame_number:06d}"
 
         cluster_labels = data[CLUSTER_KEY]
@@ -1979,8 +1989,14 @@ def main() -> None:
     if args.dihedral_error_bins <= 0:
         raise ValueError("--dihedral-error-bins must be > 0")
 
-    data_path = args.data_path.expanduser().resolve()
-    processed_dir = resolve_processed_dir(data_path, args.processed_dir)
+    data_path = resolve_data_path(args.data_path)
+    raw_npz_was_explicit = args.raw_npz_path is not None
+    processed_dir = resolve_processed_dir(
+        data_path,
+        args.processed_dir,
+        allow_data_path_dir=not raw_npz_was_explicit or args.data_path is not None,
+        allow_default_fallback=not raw_npz_was_explicit,
+    )
     raw_npz_path = resolve_raw_npz_path(data_path, args.raw_npz_path)
     labels_npz_path = resolve_labels_npz_path(args.labels_npz_path)
     checkpoint_path = resolve_checkpoint_path(args)
