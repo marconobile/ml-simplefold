@@ -1,8 +1,20 @@
 execute all new_npz_for_conditioning.ipynb, then:
 
-redis-server --dbfilename ccd.rdb --port 7777 # execute in same folder of /ml-simplefold/ccd.rdb
+IMPORTANT:
+- Do not reuse old processed SimpleFold directories that were generated before
+  the reference-conformer fix. Those files have atoms["conformer"] equal to the
+  MD frame coordinates, which leaks the answer through ref_pos.
+- Regenerate both structures/*.npz and tokens/*.pkl.
+- For trajectory NPZ inputs, process_pdb.py now reads canonical/reference
+  residue conformers from artifacts/cache/ccd.pkl and does not need Redis.
+- If ccd.pkl is elsewhere, set:
+  export SIMPLEFOLD_CCD_CACHE=/path/to/ccd.pkl
+
+# Only needed for ordinary PDB/mmCIF parsing, not for trajectory NPZ conversion:
+# redis-server --dbfilename ccd.rdb --port 7777 # execute in same folder of /ml-simplefold/ccd.rdb
 
 # 1) Convert trajectory NPZ to SimpleFold training target format
+rm -rf /scratch/nobilm/quantum_backmapping/training_data_active_npz
 python src/simplefold/process_pdb.py \
   --data_dir /home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/active_without_hs.npz \
   --out_dir /scratch/nobilm/quantum_backmapping/training_data_active_npz \
@@ -15,8 +27,22 @@ python src/simplefold/process_structure.py \
   --target_dir /scratch/nobilm/quantum_backmapping/training_data_active_npz \
   --token_dir /scratch/nobilm/quantum_backmapping/training_data_active_npz
 
+# Optional sanity check: must print False. If True, ref_pos is still leaking.
+python - <<'PY'
+import json
+import numpy as np
+from pathlib import Path
 
-# 3) Train with train.py using this dataset
+root = Path("/scratch/nobilm/quantum_backmapping/training_data_active_npz")
+with (root / "manifest.json").open() as f:
+    record_id = json.load(f)[0]["id"]
+with np.load(root / "structures" / f"{record_id}.npz", allow_pickle=False) as data:
+    atoms = data["atoms"]
+    print(np.allclose(atoms["coords"], atoms["conformer"], rtol=0.0, atol=1e-6))
+PY
+
+
+# 3) Train from scratch with train.py using this dataset
 python src/simplefold/train.py experiment=train \
   data.datasets.0.target_dir=/scratch/nobilm/quantum_backmapping/training_data_active_npz \
   data.datasets.0.tokenized_dir=/scratch/nobilm/quantum_backmapping/training_data_active_npz \
@@ -27,48 +53,76 @@ checkpoints are saved at:
 /storage_common/nobilm/ml-simplefold/artifacts/checkpoints
 following root_dir in configs/paths/default.yaml and dirpath in configs/callbacks/model_checkpoint.yaml
 
-
-
 # finetuning:
+# Before running this, regenerate /scratch/nobilm/quantum_backmapping/merged_train_data
+# with the fixed converter and rebuild its token files. Do not reuse old tokens/*.pkl.
+rm -rf /scratch/nobilm/quantum_backmapping/merged_train_data
+python src/simplefold/process_pdb.py \
+  --data_dir /home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/active_inactive_pas_without_hs.npz \
+  --out_dir /scratch/nobilm/quantum_backmapping/merged_train_data \
+  --record-prefix active_inactive_pas_without_hs
+
+python src/simplefold/process_structure.py \
+  --target_dir /scratch/nobilm/quantum_backmapping/merged_train_data \
+  --token_dir /scratch/nobilm/quantum_backmapping/merged_train_data
+
+# Optional sanity check for the fine-tuning data: must print False twice.
+python - <<'PY'
+import json
+import pickle
+import numpy as np
+from pathlib import Path
+
+root = Path("/scratch/nobilm/quantum_backmapping/merged_train_data")
+with (root / "manifest.json").open() as f:
+    record_id = json.load(f)[0]["id"]
+with np.load(root / "structures" / f"{record_id}.npz", allow_pickle=False) as data:
+    atoms = data["atoms"]
+    print("structure leak:", np.allclose(atoms["coords"], atoms["conformer"], rtol=0.0, atol=1e-6))
+with (root / "tokens" / f"{record_id}.pkl").open("rb") as f:
+    tokenized = pickle.load(f)
+atoms = tokenized.structure.atoms
+print("token leak:", np.allclose(atoms["coords"], atoms["conformer"], rtol=0.0, atol=1e-6))
+PY
+
+# Do not pass any ref_pos_mode override. The processor always uses ref_pos input,
+# matching artifacts/simplefold_100M.ckpt.
 cd /home/nobilm@usi.ch/ml-simplefold && \
 CONDA_DEFAULT_ENV=simplefold \
 PATH=/home/nobilm@usi.ch/miniconda3/envs/simplefold/bin:$PATH \
 CUDA_VISIBLE_DEVICES=0 \
 /home/nobilm@usi.ch/miniconda3/envs/simplefold/bin/python src/simplefold/train.py \
   experiment=train \
-  hydra.job.name=finetune_simplefold100M_merged_npz \
-  paths.output_dir=/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/ft_merged_npz_from_simplefold100M \
-  paths.tmp_dir=/tmp/simplefold_ft_merged_npz_tmp \
+  hydra.job.name=finetune_simplefold100M_merged_npz_max_step_30000_fix_ref_pos \
+  paths.output_dir=/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/ft_merged_npz_from_simplefold100M_max_step_30000_fix_ref_pos \
+  paths.tmp_dir=/tmp/simplefold_ft_merged_npz_tmp_max_step_30000_fix_ref_pos \
   +load_ckpt_path=/home/nobilm@usi.ch/ml-simplefold/artifacts/simplefold_100M.ckpt \
   trainer.accelerator=gpu trainer.devices=1 \
-  data.datasets.0.target_dir=/scratch/nobilm/quantum_backmapping/merged_train_data \
-  data.datasets.0.tokenized_dir=/scratch/nobilm/quantum_backmapping/merged_train_data \
-  data.datasets.0.manifest_path=/scratch/nobilm/quantum_backmapping/merged_train_data/manifest.json \
-  callbacks.model_checkpoint.dirpath=/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/ft_merged_npz_from_simplefold100M/checkpoints \
-  "callbacks.model_checkpoint.filename='merged_npz_sf100M-ft-ep{epoch:04d}-step{step:08d}'" \
+  data.datasets.0.target_dir=/scratch/nobilm/quantum_backmapping/merged_train_data_fix_ref_pos \
+  data.datasets.0.tokenized_dir=/scratch/nobilm/quantum_backmapping/merged_train_data_fix_ref_pos \
+  data.datasets.0.manifest_path=/scratch/nobilm/quantum_backmapping/merged_train_data_fix_ref_pos/manifest.json \
+  callbacks.model_checkpoint.dirpath=/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/ft_merged_npz_from_simplefold100M_max_step_30000_fix_ref_pos/checkpoints \
+  "callbacks.model_checkpoint.filename='merged_npz_sf100M-quick-ft-ep{epoch:04d}-step{step:08d}'" \
   +callbacks.model_checkpoint.every_n_epochs=1 \
   callbacks.model_checkpoint.save_on_train_epoch_end=True \
   callbacks.model_checkpoint.every_n_train_steps=null \
   +callbacks.lr_monitor._target_=lightning.pytorch.callbacks.LearningRateMonitor \
   +callbacks.lr_monitor.logging_interval=step \
-  model.optimizer.lr=5e-6 \
-  model.scheduler._target_=torch.optim.lr_scheduler.CosineAnnealingLR \
+  model.optimizer.lr=2e-5 \
+  model.scheduler._target_=utils.lr_scheduler.LinearWarmupCosineAnnealingLR \
   model.scheduler._partial_=true \
-  +model.scheduler.T_max=600000 \
-  +model.scheduler.eta_min=5e-7 \
-  '~model.scheduler.min_lr' \
-  '~model.scheduler.max_lr' \
-  '~model.scheduler.warmup_steps' \
-  trainer.max_steps=600000
-
-
-
+  model.scheduler.min_lr=5e-6 \
+  model.scheduler.max_lr=2e-5 \
+  model.scheduler.warmup_steps=500 \
+  +model.scheduler.T_max=120000 \
+  +model.scheduler.eta_min=5e-6 \
+  trainer.max_steps=30000
 
 ########
 then after finetuning for sampling either use:
 
 for a single structure:
-python scripts/evaluate_active_npz_conditioned_sample.py \
+python scripts/sample_with_conditioning.py \
 --seed 123 \
 --checkpoint-path /storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/ft_merged_npz_from_simplefold100M/checkpoints/last.ckpt \
 --raw-npz-path /home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/active_without_hs.npz \
@@ -85,8 +139,6 @@ Then to convert ALL sampled prot from cif to pdb:
 python scripts/convert_conditioned_eval_cifs_to_pdb.py --base-path /storage_common/nobilm/backmapping_pots_model/results
 
 then:
-python scripts/assign_conditioned_eval_sample_clusters.py --base-path /storage_common/nobilm/backmapping_pots_model/results_v2
+python scripts/assign_conditioned_eval_sample_clusters.py --base-path /storage_common/nobilm/backmapping_pots_model/results_sampling_unseen_structures_v2/denovo_samples/sample_1
 
-python plot_evaluation.py --base_path /storage_common/nobilm/backmapping_pots_model/results_v2 --out_dir /storage_common/nobilm/backmapping_pots_model/results_v2
-
-
+python plot_evaluation.py --base_path /storage_common/nobilm/backmapping_pots_model/results_sampling_unseen_structures/denovo_samples/sample_1 --out_dir /storage_common/nobilm/backmapping_pots_model/results_sampling_unseen_structures/denovo_samples/sample_1

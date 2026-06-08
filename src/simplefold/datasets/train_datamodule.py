@@ -29,6 +29,7 @@ from utils.datamodule_utils import (
     collate,
     extract_sequence_from_tokens,
 )
+from utils.trajectory_npz_utils import assert_no_conformer_coordinate_leak
 
 
 """
@@ -149,6 +150,10 @@ class SimpleFoldTrainingDataset(torch.utils.data.Dataset):
             except:
                 print(f"Failed tokenize {record.id}")
                 return self.__getitem__(random.randint(0, self.num_samples - 1))
+        assert_no_conformer_coordinate_leak(
+            tokenized.structure.atoms,
+            f"{record.id} tokenized structure",
+        )
 
         max_num_tokens = len(tokenized.tokens)
         if max_num_tokens == 0:

@@ -37,6 +37,25 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip conversion when the target PDB already exists.",
     )
+    parser.set_defaults(fix_chirality=True)
+    parser.add_argument(
+        "--fix-chirality",
+        dest="fix_chirality",
+        action="store_true",
+        help=(
+            "After conversion, invert all coordinates when more D- than "
+            "L-amino acids are detected. This changes the sampled coordinates "
+            "and is enabled by default."
+        ),
+    )
+    parser.add_argument(
+        "--no-fix-chirality",
+        dest="fix_chirality",
+        action="store_false",
+        help=(
+            "Convert CIF to PDB without chirality-based coordinate inversion."
+        ),
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -124,7 +143,8 @@ def main() -> None:
 
         try:
             convert_cif_to_pdb(cif_path, pdb_path)
-            ensure_l_chirality(pdb_path)
+            if args.fix_chirality:
+                ensure_l_chirality(pdb_path)
         except Exception as exc:  # Keep converting independent files.
             failures.append((cif_path, exc))
             print(f"Failed: {cif_path} ({exc})")

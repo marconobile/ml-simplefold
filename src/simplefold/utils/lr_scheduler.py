@@ -52,3 +52,45 @@ class LinearWarmup(_LRScheduler):
         self.last_epoch = math.floor(epoch)
         for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
             param_group["lr"] = lr
+
+
+class LinearWarmupCosineAnnealingLR(_LRScheduler):
+    """Linear warmup from min_lr to max_lr, then cosine decay to eta_min."""
+
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        max_lr: float = 0.1,
+        min_lr: float = 0.001,
+        warmup_steps: int = 0,
+        T_max: int = 100000,
+        eta_min: float = None,
+        last_epoch: int = -1,
+        **kwargs
+    ):
+        if warmup_steps < 0:
+            raise ValueError("warmup_steps must be >= 0")
+        if T_max <= 0:
+            raise ValueError("T_max must be > 0")
+
+        self.max_lr = max_lr
+        self.min_lr = min_lr
+        self.warmup_steps = warmup_steps
+        self.T_max = T_max
+        self.eta_min = min_lr if eta_min is None else eta_min
+
+        super(LinearWarmupCosineAnnealingLR, self).__init__(optimizer, last_epoch)
+
+    def _compute_lr(self, step):
+        if self.warmup_steps > 0 and step < self.warmup_steps:
+            pct = step / self.warmup_steps
+            return self.min_lr + (self.max_lr - self.min_lr) * pct
+
+        decay_step = max(0, step - self.warmup_steps)
+        pct = min(decay_step / self.T_max, 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * pct))
+        return self.eta_min + (self.max_lr - self.eta_min) * cosine
+
+    def get_lr(self):
+        step = max(self.last_epoch, 0)
+        return [self._compute_lr(step) for _ in self.optimizer.param_groups]

@@ -4,8 +4,11 @@
 #
 
 import json
+import os
+import pickle
 import re
 from dataclasses import asdict
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -61,6 +64,10 @@ ATOMIC_NUMBERS = {
     "I": 53,
 }
 
+DEFAULT_CCD_CACHE_PATH = (
+    Path(__file__).resolve().parents[3] / "artifacts" / "cache" / "ccd.pkl"
+)
+
 
 def is_trajectory_npz_input(data_path: Path) -> bool:
     return data_path.is_file() and data_path.suffix.lower() == ".npz"
@@ -83,6 +90,96 @@ def guess_atomic_number(atom_name: str) -> int:
         if char.isalpha():
             return ATOMIC_NUMBERS.get(char, 0)
     return 0
+
+
+def ccd_cache_path() -> Path:
+    return Path(os.environ.get("SIMPLEFOLD_CCD_CACHE", DEFAULT_CCD_CACHE_PATH))
+
+
+@lru_cache(maxsize=1)
+def load_ccd_components(ccd_path: str) -> dict:
+    path = Path(ccd_path).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"CCD cache not found: {path}. Set SIMPLEFOLD_CCD_CACHE to a ccd.pkl "
+            "file or generate artifacts/cache/ccd.pkl before converting trajectory NPZs."
+        )
+    with path.open("rb") as f:
+        return pickle.load(f)
+
+
+def get_reference_conformer(mol):
+    for conformer in mol.GetConformers():
+        if conformer.HasProp("name") and conformer.GetProp("name") == "Computed":
+            return conformer
+    for conformer in mol.GetConformers():
+        if conformer.HasProp("name") and conformer.GetProp("name") == "Ideal":
+            return conformer
+    raise ValueError("CCD molecule does not contain a Computed or Ideal conformer.")
+
+
+@lru_cache(maxsize=None)
+def reference_features_for_residue(residue_name: str) -> dict[str, tuple[np.ndarray, int, int, int]]:
+    from rdkit.Chem import AllChem
+
+    residue_name = residue_name.strip().upper()
+    ccd = load_ccd_components(str(ccd_cache_path()))
+    if residue_name not in ccd:
+        raise KeyError(f"Residue {residue_name!r} is missing from CCD cache.")
+
+    ref_mol = AllChem.RemoveHs(ccd[residue_name], sanitize=False)
+    conformer = get_reference_conformer(ref_mol)
+    unknown_chirality = const.chirality_type_ids[const.unk_chirality_type]
+
+    features = {}
+    for atom in ref_mol.GetAtoms():
+        if not atom.HasProp("name"):
+            continue
+        atom_name = atom.GetProp("name").strip().upper()
+        pos = conformer.GetAtomPosition(atom.GetIdx())
+        features[atom_name] = (
+            np.array((pos.x, pos.y, pos.z), dtype=np.float32),
+            int(atom.GetAtomicNum()),
+            int(atom.GetFormalCharge()),
+            int(const.chirality_type_ids.get(atom.GetChiralTag(), unknown_chirality)),
+        )
+    return features
+
+
+def apply_reference_conformer_features(
+    atoms: np.ndarray,
+    atom_indices: np.ndarray,
+    residue_name: str,
+    residue_atom_names: np.ndarray,
+) -> None:
+    if residue_name not in PROTEIN_RESIDUES:
+        raise ValueError(
+            "Could not infer a standard amino-acid residue from atom names "
+            f"{residue_atom_names.tolist()}. Add residue-name metadata to the NPZ "
+            "or fix atom names before conversion."
+        )
+
+    reference_features = reference_features_for_residue(residue_name)
+    for atom_index, raw_atom_name in zip(atom_indices, residue_atom_names):
+        atom_name = str(raw_atom_name).strip().upper()
+        if atom_name not in reference_features:
+            raise ValueError(
+                f"Atom {atom_name!r} in inferred residue {residue_name!r} is not "
+                "present in the CCD reference conformer."
+            )
+        ref_pos, element, charge, chirality = reference_features[atom_name]
+        atoms["conformer"][atom_index] = ref_pos
+        atoms["element"][atom_index] = element
+        atoms["charge"][atom_index] = charge
+        atoms["chirality"][atom_index] = chirality
+
+
+def assert_no_conformer_coordinate_leak(atoms: np.ndarray, context: str) -> None:
+    if np.allclose(atoms["coords"], atoms["conformer"], rtol=0.0, atol=1e-6):
+        raise ValueError(
+            f"{context}: atoms['conformer'] is identical to atoms['coords']; "
+            "this would leak target/frame geometry into ref_pos."
+        )
 
 
 def infer_residue_name(atom_names: np.ndarray) -> str:
@@ -177,6 +274,12 @@ def build_static_topology(
         residue_atom_names = atom_names[atom_indices]
         residue_name = infer_residue_name(residue_atom_names)
         residue_token_id = const.token_ids.get(residue_name, const.token_ids["UNK"])
+        apply_reference_conformer_features(
+            atoms,
+            atom_indices,
+            residue_name,
+            residue_atom_names,
+        )
 
         atom_name_list = [name.strip().upper() for name in residue_atom_names.tolist()]
         center_name = const.res_to_center_atom.get(residue_name, "CA")
@@ -365,7 +468,7 @@ def convert_trajectory_npz_to_simplefold(
             coords = trajectory[frame_position].astype(np.float32, copy=False)
             atoms = atoms_template.copy()
             atoms["coords"] = coords
-            atoms["conformer"] = coords
+            assert_no_conformer_coordinate_leak(atoms, record_id)
 
             payload = {
                 "atoms": atoms,

@@ -19,18 +19,19 @@ set -euo pipefail
 # pas: /home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/pas_without_hs.npz
 
 
-N="${N:-5}"
+N="${N:-1}" # leave 1 change the N below 
 BASE_SEED="${BASE_SEED:-123}"
 DEVICE="${DEVICE:-cuda:1}"
 CONDA_ENV="${CONDA_ENV:-simplefold}"
-
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/ft_merged_npz_from_simplefold100M/checkpoints/last.ckpt}"
 RAW_NPZ_DIR="${RAW_NPZ_DIR:-${REPO_ROOT}/test_new_data_with_clusters}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/backmapping_pots_model/results}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/backmapping_pots_model/results_sampling_unseen_structures_new_model}"
 
-t_values=("active" "inactive" "pas")
+# LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/local_cluster_id_sample.npz"
+LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/sample.npz"
+
+t_values=("active") # "inactive" "pas") # for denovo just need 1 for input processing
 
 if command -v conda >/dev/null 2>&1; then
     eval "$(conda shell.bash hook)"
@@ -46,12 +47,18 @@ else
 fi
 
 conda activate "${CONDA_ENV}"
-
 cd "${REPO_ROOT}"
 
 for TYPE in "${t_values[@]}"; do
     RAW_NPZ_PATH="${RAW_NPZ_DIR}/${TYPE}_without_hs.npz"
-    TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/${TYPE}_samples"
+    echo "Processing TYPE=${TYPE} with raw NPZ: ${RAW_NPZ_PATH}"
+    
+
+    if [ -n "$LABELS_NPZ_PATH" ]; then
+        TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/denovo_samples"
+    else
+        TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/${TYPE}_samples"
+    fi
 
     if [[ ! -f "${RAW_NPZ_PATH}" ]]; then
         echo "Missing raw NPZ: ${RAW_NPZ_PATH}" >&2
@@ -67,10 +74,12 @@ for TYPE in "${t_values[@]}"; do
         echo "Running TYPE=${TYPE} SAMPLE=${SAMPLE_INDEX}/${N} SEED=${SEED}"
         echo "Output: ${SAMPLE_OUTPUT_DIR}"
 
-        python scripts/evaluate_active_npz_conditioned_sample.py \
+        python scripts/sample_with_conditioning.py \
             --seed "${SEED}" \
+            -N 20 \
             --checkpoint-path "${CHECKPOINT_PATH}" \
             --raw-npz-path "${RAW_NPZ_PATH}" \
+            --labels-npz-path "${LABELS_NPZ_PATH}" \
             --output-dir "${SAMPLE_OUTPUT_DIR}" \
             --device "${DEVICE}"
     done

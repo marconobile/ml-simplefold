@@ -28,7 +28,7 @@ DEFAULT_INACTIVE_PDB = Path(
 )
 DEFAULT_PAS_PDB = Path(
     "/home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/"
-    "pas_without_hs_frame_00000.pdb"
+    "pas_without_hs_frame_19168.pdb"
 )
 DEFAULT_OUTPUT_DIR = Path(
     "/storage_common/nobilm/backmapping_pots_model/pots_samples/simplefold_samples"

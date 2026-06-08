@@ -188,7 +188,11 @@ class FoldingDiT(nn.Module):
             "atom_idx_and_glob_cluster_id_per_frame",
             None,
         )
-        atom_idx_and_glob_cluster_id_per_frame[atom_idx_and_glob_cluster_id_per_frame == -1] = self.pad_idx
+        atom_idx_and_glob_cluster_id_per_frame = torch.where(
+            atom_idx_and_glob_cluster_id_per_frame == -1,
+            torch.full_like(atom_idx_and_glob_cluster_id_per_frame, self.pad_idx),
+            atom_idx_and_glob_cluster_id_per_frame,
+        )
         cluster_emb = self.cluster_embeddings(atom_idx_and_glob_cluster_id_per_frame.to(self.cluster_embeddings.weight.device))
 
         # create atom attention masks

@@ -227,4 +227,4 @@ python -m pip install -U pip build; pip install -e .
 ```
 
 # to eval post fine tuning:
-python scripts/evaluate_active_npz_conditioned_sample.py --frame-index 0 --seed 123
+python scripts/sample_with_conditioning.py --frame-index 0 --seed 123

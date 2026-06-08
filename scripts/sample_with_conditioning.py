@@ -3,15 +3,15 @@
 
 Command-line usage:
 
-    python scripts/evaluate_active_npz_conditioned_sample.py [options]
+    python scripts/sample_with_conditioning.py [options]
 
 Common examples:
 
     # Evaluate a deterministic frame/sample pair with the default dataset and checkpoint.
-    python scripts/evaluate_active_npz_conditioned_sample.py --frame-index 0 --seed 123
+    python scripts/sample_with_conditioning.py --frame-index 0 --seed 123
 
     # Use explicit raw and processed inputs.
-    python scripts/evaluate_active_npz_conditioned_sample.py \
+    python scripts/sample_with_conditioning.py \
         --raw-npz-path /path/to/trajectory.npz \
         --processed-dir /path/to/processed_simplefold_dir \
         --checkpoint-path /path/to/last.ckpt \
@@ -19,7 +19,7 @@ Common examples:
         --seed 123
 
     # Generate one sample for each row of an external labels NPZ.
-    python scripts/evaluate_active_npz_conditioned_sample.py \
+    python scripts/sample_with_conditioning.py \
         --raw-npz-path /path/to/template_topology.npz \
         --labels-npz-path /path/to/labels.npz \
         --checkpoint-path /path/to/last.ckpt \
@@ -35,13 +35,19 @@ Input and output arguments:
         Raw trajectory NPZ containing trajectory, dihedrals,
         dihedral_atom_indices, dihedral_mask, and
         atom_idx_and_glob_cluster_id_per_frame. Only needed when auto-discovery
-        cannot find the raw NPZ.
+        cannot find the raw NPZ. Dihedrals,
+        dihedral_atom_indices, dihedral_mask are ignored in this script 
+        and were used only for exendiff version of this work.
 
     --labels-npz-path PATH
         Optional NPZ containing atom_idx_and_glob_cluster_id_per_frame with
-        shape (n_samples, n_atoms_with_global_clusters). When provided, each
-        row is used as conditioning labels for one generated sample, and
+        shape (n_samples, n_model_atoms). When provided, each row is used
+        exactly as conditioning labels for one generated sample, and
         original-structure coordinate/dihedral evaluation is skipped.
+
+    -N, --num-label-samples INT
+        Maximum number of rows to sample from --labels-npz-path. Defaults to
+        all rows. Only used when --labels-npz-path is provided.
 
     --processed-dir PATH
         Processed SimpleFold directory containing structures/, records/, and
@@ -125,7 +131,6 @@ import argparse
 import csv
 import gc
 import json
-import pickle
 import subprocess
 import sys
 from copy import deepcopy
@@ -154,7 +159,11 @@ from processor.protein_processor import ProteinDataProcessor  # noqa: E402
 from utils.datamodule_utils import collate, extract_sequence_from_tokens  # noqa: E402
 from utils.boltz_utils import process_structure, save_structure  # noqa: E402
 from utils.esm_utils import _af2_to_esm, esm_registry  # noqa: E402
-from utils.trajectory_npz_utils import build_static_topology, sanitize_record_prefix  # noqa: E402
+from utils.trajectory_npz_utils import (  # noqa: E402
+    assert_no_conformer_coordinate_leak,
+    build_static_topology,
+    sanitize_record_prefix,
+)
 
 
 DEFAULT_DATA_PATH = Path("/scratch/nobilm/quantum_backmapping/training_data_active_npz")
@@ -210,9 +219,19 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional NPZ containing `atom_idx_and_glob_cluster_id_per_frame` "
-            "with shape (n_samples, n_atoms_with_global_clusters). When provided, "
-            "one conditioned sample is generated for each row and original-structure "
-            "coordinate/dihedral evaluation is skipped."
+            "with shape (n_samples, n_model_atoms). When provided, one conditioned "
+            "sample is generated for each row using the row exactly, and "
+            "original-structure coordinate/dihedral evaluation is skipped."
+        ),
+    )
+    parser.add_argument(
+        "-N",
+        "--num-label-samples",
+        type=int,
+        default=None,
+        help=(
+            "Maximum number of rows to sample from --labels-npz-path. Defaults "
+            "to all rows. Only used when --labels-npz-path is provided."
         ),
     )
     parser.add_argument(
@@ -383,7 +402,7 @@ def load_conditioning_label_rows(labels_npz_path: Path) -> np.ndarray:
     if label_rows.ndim != 2:
         raise ValueError(
             f"`{CLUSTER_KEY}` in --labels-npz-path must have shape "
-            f"(n_samples, n_atoms_with_global_clusters), got {label_rows.shape}."
+            f"(n_samples, n_model_atoms), got {label_rows.shape}."
         )
     if label_rows.shape[0] == 0:
         raise ValueError("--labels-npz-path contains zero label rows.")
@@ -574,6 +593,7 @@ def load_processed_frame(
 
     with np.load(struct_path, allow_pickle=False) as data:
         atoms = data["atoms"]
+        assert_no_conformer_coordinate_leak(atoms, str(struct_path))
         selected_sample = np.asarray(atoms["coords"], dtype=np.float32)
         if CLUSTER_KEY not in data.files:
             raise KeyError(f"Processed structure is missing `{CLUSTER_KEY}`: {struct_path}")
@@ -671,7 +691,7 @@ def build_structure_and_record_from_raw(frame_data: dict[str, Any]) -> tuple[Str
     atoms = atoms_template.copy()
     coords = frame_data["original_coords"].astype(np.float32, copy=False)
     atoms["coords"] = coords
-    atoms["conformer"] = coords
+    assert_no_conformer_coordinate_leak(atoms, frame_data["record_id"])
 
     structure = Structure(
         atoms=atoms,
@@ -716,6 +736,28 @@ def pad_cluster_labels(
     *,
     device: torch.device | None = None,
 ) -> torch.Tensor:
+    labels_tensor = cluster_labels_to_tensor(cluster_labels, device=device)
+    if labels_tensor.shape[0] > num_model_atoms:
+        raise ValueError(
+            f"Conditioning labels have {labels_tensor.shape[0]} atoms, but the "
+            f"featurized model input has only {num_model_atoms} atoms."
+        )
+
+    padded_cluster_labels = torch.full(
+        (num_model_atoms,),
+        -1,
+        dtype=torch.long,
+        device=device,
+    )
+    padded_cluster_labels[: labels_tensor.shape[0]] = labels_tensor
+    return padded_cluster_labels
+
+
+def cluster_labels_to_tensor(
+    cluster_labels: np.ndarray | torch.Tensor,
+    *,
+    device: torch.device | None = None,
+) -> torch.Tensor:
     if isinstance(cluster_labels, torch.Tensor):
         labels_tensor = cluster_labels.detach().to(dtype=torch.long, device=device)
     else:
@@ -730,35 +772,70 @@ def pad_cluster_labels(
             f"Conditioning labels must be one-dimensional per sample, got "
             f"{tuple(labels_tensor.shape)}."
         )
-    if labels_tensor.shape[0] > num_model_atoms:
-        raise ValueError(
-            f"Conditioning labels have {labels_tensor.shape[0]} atoms, but the "
-            f"featurized model input has only {num_model_atoms} atoms."
-        )
     if labels_tensor.numel() > 0 and int(labels_tensor.min().item()) < -1:
         raise ValueError("Conditioning labels contain labels below -1.")
-
-    padded_cluster_labels = torch.full(
-        (num_model_atoms,),
-        -1,
-        dtype=torch.long,
-        device=device,
-    )
-    padded_cluster_labels[: labels_tensor.shape[0]] = labels_tensor
-    return padded_cluster_labels
+    return labels_tensor.clone()
 
 
-def set_batch_cluster_labels(batch: dict[str, Any], cluster_labels: np.ndarray) -> None:
+def exact_cluster_labels(
+    cluster_labels: np.ndarray | torch.Tensor,
+    num_model_atoms: int,
+    *,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    labels_tensor = cluster_labels_to_tensor(cluster_labels, device=device)
+    if labels_tensor.shape[0] != num_model_atoms:
+        raise ValueError(
+            f"Labels NPZ row has {labels_tensor.shape[0]} atom labels, but the "
+            f"featurized model input has {num_model_atoms} atoms. In "
+            "--labels-npz-path mode, the model receives the labels row exactly, "
+            "so the lengths must match."
+        )
+    return labels_tensor
+
+
+def set_batch_cluster_labels(
+    batch: dict[str, Any],
+    cluster_labels: np.ndarray,
+    *,
+    exact: bool = False,
+) -> None:
     num_model_atoms = int(batch["coords"].shape[1])
     batch_size = int(batch["coords"].shape[0])
     if batch_size != 1:
         raise ValueError(f"Expected a single-structure batch, got batch size {batch_size}.")
-    padded_cluster_labels = pad_cluster_labels(
-        cluster_labels,
-        num_model_atoms,
-        device=batch["coords"].device,
-    )
-    batch[CLUSTER_KEY] = padded_cluster_labels.unsqueeze(0)
+    if exact:
+        labels_tensor = cluster_labels_to_tensor(
+            cluster_labels,
+            device=batch["coords"].device,
+        )
+        if labels_tensor.shape[0] == num_model_atoms:
+            label_tensor = labels_tensor
+        else:
+            atom_pad_mask = batch.get("atom_pad_mask")
+            num_valid_atoms = (
+                int(atom_pad_mask[0].sum().item())
+                if atom_pad_mask is not None
+                else num_model_atoms
+            )
+            if labels_tensor.shape[0] != num_valid_atoms:
+                raise ValueError(
+                    f"Labels NPZ row has {labels_tensor.shape[0]} atom labels, "
+                    f"but the featurized model input has {num_valid_atoms} valid "
+                    f"atoms and {num_model_atoms} padded atoms."
+                )
+            label_tensor = pad_cluster_labels(
+                labels_tensor,
+                num_model_atoms,
+                device=batch["coords"].device,
+            )
+    else:
+        label_tensor = pad_cluster_labels(
+            cluster_labels,
+            num_model_atoms,
+            device=batch["coords"].device,
+        )
+    batch[CLUSTER_KEY] = label_tensor.unsqueeze(0)
 
 
 def validate_cluster_labels_for_model(
@@ -789,7 +866,7 @@ def prepare_conditioned_batch(
     esm_dict: dict[str, Any],
     af2_to_esm: torch.Tensor,
 ) -> tuple[dict[str, Any], Structure, Record]:
-    structure_path, record_path, tokenized_path = find_processed_paths(
+    structure_path, record_path, _tokenized_path = find_processed_paths(
         processed_dir,
         frame_data["record_id"],
         int(frame_data["frame_index"]),
@@ -797,13 +874,12 @@ def prepare_conditioned_batch(
 
     if structure_path is not None and record_path is not None:
         structure = Structure.load(structure_path)
+        assert_no_conformer_coordinate_leak(structure.atoms, str(structure_path))
         with record_path.open() as f:
             record_dict = json.load(f)
-        if tokenized_path is not None:
-            with tokenized_path.open("rb") as f:
-                tokenized = pickle.load(f)
-        else:
-            tokenized = tokenizer.tokenize(Input(structure, {}))
+        # Re-tokenize from the loaded structure so stale tokens cannot carry
+        # leaked frame coordinates in atom["conformer"].
+        tokenized = tokenizer.tokenize(Input(structure, {}))
     else:
         structure, record_dict = build_structure_and_record_from_raw(frame_data)
         tokenized = tokenizer.tokenize(Input(structure, {}))
@@ -1055,6 +1131,53 @@ def load_sampled_pdb_dihedral_coords(
             f"but expected {expected_shape}: {sampled_pdb_path}"
         )
     return coords
+
+
+def validate_sampled_pdb_matches_coords(
+    sampled_pdb_path: Path,
+    sampled_coords: np.ndarray,
+    *,
+    atol: float = 1e-2,
+    allow_global_inversion: bool = True,
+) -> np.ndarray:
+    pdb_coords = load_sampled_pdb_dihedral_coords(
+        sampled_pdb_path,
+        expected_shape=sampled_coords.shape,
+    )
+    sampled_coords = sampled_coords.astype(np.float32, copy=False)
+    pdb_coords_f32 = pdb_coords.astype(np.float32, copy=False)
+    deltas = np.abs(pdb_coords_f32 - sampled_coords)
+    max_abs_delta = float(np.max(deltas))
+    if max_abs_delta <= float(atol):
+        return pdb_coords
+
+    if allow_global_inversion:
+        inverted_deltas = np.abs(pdb_coords_f32 + sampled_coords)
+        inverted_max_abs_delta = float(np.max(inverted_deltas))
+        if inverted_max_abs_delta <= float(atol):
+            print(
+                "Converted sampled PDB coordinates match the sampled arrays after "
+                f"global chirality inversion: {sampled_pdb_path}"
+            )
+            return pdb_coords
+
+    rmsd = float(np.sqrt(np.mean(np.sum(deltas * deltas, axis=-1))))
+    message = (
+        f"Converted sampled PDB coordinates do not match the sampled arrays "
+        f"for {sampled_pdb_path}: max_abs_delta={max_abs_delta:.4f}, "
+        f"rmsd={rmsd:.4f}."
+    )
+    if allow_global_inversion:
+        inverted_deltas = np.abs(pdb_coords_f32 + sampled_coords)
+        inverted_rmsd = float(
+            np.sqrt(np.mean(np.sum(inverted_deltas * inverted_deltas, axis=-1)))
+        )
+        message += (
+            f" Also checked global inversion: "
+            f"max_abs_delta={float(np.max(inverted_deltas)):.4f}, "
+            f"rmsd={inverted_rmsd:.4f}."
+        )
+    raise ValueError(message)
 
 
 def compute_dihedral_angles(
@@ -1608,7 +1731,7 @@ def write_report(
 def output_stem_for_sample(record_id: str, label_sample_index: int | None) -> str:
     if label_sample_index is None:
         return f"{record_id}_conditioned_eval"
-    return f"{record_id}_labels_{label_sample_index:06d}_conditioned_eval"
+    return f"following_label_{label_sample_index}_conditioned_eval"
 
 
 def sample_conditioned_structure(
@@ -1635,7 +1758,14 @@ def sample_conditioned_structure(
         dtype=np.int64,
     ).copy()
     validate_cluster_labels_for_model(conditioning_cluster_labels, model)
-    set_batch_cluster_labels(batch, conditioning_cluster_labels)
+    set_batch_cluster_labels(
+        batch,
+        conditioning_cluster_labels,
+        exact=labels_npz_path is not None,
+    )
+    model_conditioning_cluster_labels = (
+        batch[CLUSTER_KEY][0].detach().cpu().numpy().astype(np.int64, copy=False)
+    )
 
     template_coords = frame_data["original_coords"]
     print(
@@ -1774,12 +1904,12 @@ def sample_conditioned_structure(
         output_dir=args.output_dir,
         current_file_only=labels_npz_path is not None,
     )
+    sampled_pdb_coords = validate_sampled_pdb_matches_coords(
+        sampled_pdb_path,
+        sampled_coords,
+    )
 
     if evaluate_against_original and original_dihedrals is not None:
-        sampled_pdb_coords = load_sampled_pdb_dihedral_coords(
-            sampled_pdb_path,
-            expected_shape=original_coords.shape,
-        )
         sampled_dihedrals = compute_dihedral_angles(
             sampled_pdb_coords,
             frame_data["dihedral_atom_indices"],
@@ -1894,6 +2024,11 @@ def sample_conditioned_structure(
         "sampled_coords_full": sampled_coords_full,
         "model_atom_pad_mask": atom_mask_full,
         "conditioning_cluster_labels": conditioning_cluster_labels,
+        "conditioning_cluster_labels_model_input": model_conditioning_cluster_labels,
+        "label_sample_index": np.asarray(
+            -1 if label_sample_index is None else label_sample_index,
+            dtype=np.int64,
+        ),
         "frame_position": np.asarray(frame_data["frame_position"], dtype=np.int64),
         "frame_index": np.asarray(frame_data["frame_index"], dtype=np.int64),
     }
@@ -1984,6 +2119,8 @@ def main() -> None:
     args = parse_args()
     if args.num_steps <= 0:
         raise ValueError("--num-steps must be > 0")
+    if args.num_label_samples is not None and args.num_label_samples <= 0:
+        raise ValueError("-N/--num-label-samples must be > 0")
     if args.dihedral_angle_bins <= 0:
         raise ValueError("--dihedral-angle-bins must be > 0")
     if args.dihedral_error_bins <= 0:
@@ -2026,6 +2163,8 @@ def main() -> None:
     if labels_npz_path is not None:
         print(f"Loading conditioning labels NPZ: {labels_npz_path}")
         conditioning_label_rows = load_conditioning_label_rows(labels_npz_path)
+        if args.num_label_samples is not None:
+            conditioning_label_rows = conditioning_label_rows[: args.num_label_samples]
         print(
             f"Loaded {conditioning_label_rows.shape[0]} conditioning label row(s) "
             f"with {conditioning_label_rows.shape[1]} label(s) each."
