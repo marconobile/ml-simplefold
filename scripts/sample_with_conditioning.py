@@ -329,6 +329,16 @@ def parse_args() -> argparse.Namespace:
         help="ESM model name used by the trained SimpleFold model.",
     )
     parser.add_argument(
+        "--ref-pos-mode",
+        choices=("input", "zero"),
+        default="input",
+        help=(
+            "How to pass ref_pos into FoldingDiT. Use `zero` with checkpoints "
+            "fine-tuned using model.processor.ref_pos_mode=zero to avoid leaking "
+            "template-frame geometry into label-conditioned sampling."
+        ),
+    )
+    parser.add_argument(
         "--use-non-ema-weights",
         action="store_true",
         help="Load `model.` weights instead of `model_ema.module.` weights when both exist.",
@@ -2211,6 +2221,7 @@ def main() -> None:
         multiplicity=1,
         inference_multiplicity=1,
         backend="torch",
+        ref_pos_mode=args.ref_pos_mode,
     )
     tokenizer = BoltzTokenizer()
     featurizer = BoltzFeaturizer()

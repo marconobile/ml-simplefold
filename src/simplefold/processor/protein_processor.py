@@ -28,6 +28,7 @@ class ProteinDataProcessor:
         multiplicity=1,
         inference_multiplicity=1,
         backend="torch",
+        ref_pos_mode="input",
     ):
         self.device = device
         self.scale = scale
@@ -36,12 +37,23 @@ class ProteinDataProcessor:
         self.multiplicity = multiplicity
         self.inference_multiplicity = inference_multiplicity
         self.backend = backend
+        self.ref_pos_mode = ref_pos_mode
         if self.backend == "mlx":
             self.center_random_fn = mlx_center_random
         elif self.backend == "torch":
             self.center_random_fn = torch_center_random
         else:
             raise ValueError(f"Unsupported backend: {self.backend}. Choose 'torch' or 'mlx'.")
+
+    def apply_ref_pos_mode(self, batch):
+        """Remove target-geometry leakage from ref_pos when requested."""
+        if self.ref_pos_mode == "input":
+            return batch
+        if self.ref_pos_mode == "zero":
+            batch["ref_pos"] = torch.zeros_like(batch["ref_pos"])
+            return batch
+        raise AssertionError(f"Unhandled ref_pos_mode={self.ref_pos_mode!r}")
+
 
     def process_esm(
         self, 
@@ -132,6 +144,7 @@ class ProteinDataProcessor:
 
         ref_y = batch['ref_pos'].float() / self.ref_scale
         batch['ref_pos'] = ref_y
+        batch = self.apply_ref_pos_mode(batch)
 
         mol_index = torch.arange(max_natoms).unsqueeze(0).expand(
             batch_size, -1)
@@ -159,6 +172,7 @@ class ProteinDataProcessor:
 
         batch['coords'] = batch['coords'].squeeze(1) / self.scale
         batch['ref_pos'] = batch['ref_pos'].float() / self.ref_scale
+        batch = self.apply_ref_pos_mode(batch)
 
         batch['atom_to_token_idx'] = torch.argmax(
             batch['atom_to_token'], dim=-1)
