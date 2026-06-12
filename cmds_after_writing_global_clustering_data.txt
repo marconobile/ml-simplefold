@@ -90,7 +90,7 @@ PY
 cd /home/nobilm@usi.ch/ml-simplefold && \
 CONDA_DEFAULT_ENV=simplefold \
 PATH=/home/nobilm@usi.ch/miniconda3/envs/simplefold/bin:$PATH \
-CUDA_VISIBLE_DEVICES=0 \
+CUDA_VISIBLE_DEVICES=2 \
 /home/nobilm@usi.ch/miniconda3/envs/simplefold/bin/python src/simplefold/train.py \
   experiment=train \
   hydra.job.name=finetune_simplefold100M_merged_npz_max_step_30000_fix_ref_pos \
@@ -102,7 +102,7 @@ CUDA_VISIBLE_DEVICES=0 \
   data.datasets.0.tokenized_dir=/scratch/nobilm/quantum_backmapping/merged_train_data_fix_ref_pos \
   data.datasets.0.manifest_path=/scratch/nobilm/quantum_backmapping/merged_train_data_fix_ref_pos/manifest.json \
   callbacks.model_checkpoint.dirpath=/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/ft_merged_npz_from_simplefold100M_max_step_30000_fix_ref_pos/checkpoints \
-  "callbacks.model_checkpoint.filename='merged_npz_sf100M-quick-ft-ep{epoch:04d}-step{step:08d}'" \
+  "callbacks.model_checkpoint.filename='fixed_shorter_merged_npz_sf100M-quick-ft-ep{epoch:04d}-step{step:08d}'" \
   +callbacks.model_checkpoint.every_n_epochs=1 \
   callbacks.model_checkpoint.save_on_train_epoch_end=True \
   callbacks.model_checkpoint.every_n_train_steps=null \
@@ -113,11 +113,11 @@ CUDA_VISIBLE_DEVICES=0 \
   model.scheduler._partial_=true \
   model.scheduler.min_lr=5e-6 \
   model.scheduler.max_lr=2e-5 \
-  model.scheduler.warmup_steps=500 \
+  model.scheduler.warmup_steps=1000 \
   +model.scheduler.T_max=120000 \
   +model.scheduler.eta_min=5e-6 \
-  trainer.max_steps=30000
-
+  trainer.max_steps=20000
+  
 ########
 then after finetuning for sampling either use:
 
@@ -134,9 +134,9 @@ bash scripts/run_conditioned_eval_samples.sh
 
 that runs the above N times for active/inactive/pas
 
-NOT NEEDED ANYMORE
-Then to convert ALL sampled prot from cif to pdb:
-python scripts/convert_conditioned_eval_cifs_to_pdb.py --base-path /storage_common/nobilm/backmapping_pots_model/results
+#NOT NEEDED ANYMORE
+#Then to convert ALL sampled prot from cif to pdb:
+#python scripts/convert_conditioned_eval_cifs_to_pdb.py --base-path /storage_common/nobilm/backmapping_pots_model/results
 
 then:
 python scripts/assign_conditioned_eval_sample_clusters.py --base-path /storage_common/nobilm/backmapping_pots_model/results_sampling_unseen_structures_v2/denovo_samples/sample_1

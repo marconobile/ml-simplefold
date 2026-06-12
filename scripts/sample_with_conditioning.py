@@ -1914,9 +1914,12 @@ def sample_conditioned_structure(
         output_dir=args.output_dir,
         current_file_only=labels_npz_path is not None,
     )
+    sampled_coords_for_pdb_validation = (
+        aligned_sampled_coords if evaluate_against_original else sampled_coords
+    )
     sampled_pdb_coords = validate_sampled_pdb_matches_coords(
         sampled_pdb_path,
-        sampled_coords,
+        sampled_coords_for_pdb_validation,
     )
 
     if evaluate_against_original and original_dihedrals is not None:

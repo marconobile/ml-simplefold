@@ -18,20 +18,25 @@ set -euo pipefail
 # inactive: /home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/inactive_without_hs.npz
 # pas: /home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/pas_without_hs.npz
 
+# check for changes
+DEVICE="${DEVICE:-cuda:2}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/ft_merged_npz_from_simplefold100M_max_step_30000_fix_ref_pos/checkpoints/last.ckpt}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/backmapping_pots_model/ft_merged_npz_from_simplefold100M_max_step_30000_fix_ref_pos_vs_ref_act_inact_pas_v3}"
 
-N="${N:-1}" # leave 1 change the N below 
+# fixed
+N="${N:-10}" # leave 1 change the N below 
 BASE_SEED="${BASE_SEED:-123}"
-DEVICE="${DEVICE:-cuda:1}"
 CONDA_ENV="${CONDA_ENV:-simplefold}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/ft_merged_npz_from_simplefold100M/checkpoints/last.ckpt}"
 RAW_NPZ_DIR="${RAW_NPZ_DIR:-${REPO_ROOT}/test_new_data_with_clusters}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/backmapping_pots_model/results_sampling_unseen_structures_new_model}"
+t_values=("active" "inactive" "pas") # for denovo just need 1 for input processing
 
-# LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/local_cluster_id_sample.npz"
-LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/sample.npz"
 
-t_values=("active") # "inactive" "pas") # for denovo just need 1 for input processing
+#! for denovo
+# t_values=("active") # for denovo just need 1 for input processing
+# LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/sample.npz"
+# TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/denovo_samples"
+
 
 if command -v conda >/dev/null 2>&1; then
     eval "$(conda shell.bash hook)"
@@ -51,14 +56,10 @@ cd "${REPO_ROOT}"
 
 for TYPE in "${t_values[@]}"; do
     RAW_NPZ_PATH="${RAW_NPZ_DIR}/${TYPE}_without_hs.npz"
-    echo "Processing TYPE=${TYPE} with raw NPZ: ${RAW_NPZ_PATH}"
+    echo "Processing TYPE=${TYPE} with raw NPZ: ${RAW_NPZ_PATH}"    
     
-
-    if [ -n "$LABELS_NPZ_PATH" ]; then
-        TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/denovo_samples"
-    else
-        TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/${TYPE}_samples"
-    fi
+    
+    TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/${TYPE}_samples" #! here for active inactive pas splitting
 
     if [[ ! -f "${RAW_NPZ_PATH}" ]]; then
         echo "Missing raw NPZ: ${RAW_NPZ_PATH}" >&2
@@ -73,14 +74,19 @@ for TYPE in "${t_values[@]}"; do
 
         echo "Running TYPE=${TYPE} SAMPLE=${SAMPLE_INDEX}/${N} SEED=${SEED}"
         echo "Output: ${SAMPLE_OUTPUT_DIR}"
-
+        
+        # --labels-npz-path: optional, if present used for conditioning, if not present uses structures from --raw-npz-path 
+        # --ref-pos-mode zero \
         python scripts/sample_with_conditioning.py \
             --seed "${SEED}" \
-            -N 20 \
+            -N 50 \
             --checkpoint-path "${CHECKPOINT_PATH}" \
             --raw-npz-path "${RAW_NPZ_PATH}" \
-            --labels-npz-path "${LABELS_NPZ_PATH}" \
             --output-dir "${SAMPLE_OUTPUT_DIR}" \
             --device "${DEVICE}"
+            # --labels-npz-path "${LABELS_NPZ_PATH}" \
     done
 done
+
+python scripts/assign_conditioned_eval_sample_clusters.py --base-path "${SAMPLE_OUTPUT_DIR}"
+python plot_evaluation.py --base_path "${SAMPLE_OUTPUT_DIR}" --out_dir "${SAMPLE_OUTPUT_DIR}"
