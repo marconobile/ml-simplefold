@@ -19,18 +19,17 @@ set -euo pipefail
 # pas: /home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/pas_without_hs.npz
 
 # check for changes
-DEVICE="${DEVICE:-cuda:2}"
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/ft_merged_npz_from_simplefold100M_max_step_30000_fix_ref_pos/checkpoints/last.ckpt}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/backmapping_pots_model/ft_merged_npz_from_simplefold100M_max_step_30000_fix_ref_pos_vs_ref_act_inact_pas_v3}"
+DEVICE="${DEVICE:-cuda:3}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/ft_merged_npz_from_simplefold100M_max_step_600k_fix_ref_pos/checkpoints/last.ckpt}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/backmapping_pots_model/ft_merged_npz_from_simplefold100M_max_step_60000_fix_ref_pos_vs_ref_act_inact_pas}"
 
 # fixed
-N="${N:-10}" # leave 1 change the N below 
+N="${N:-1}" # leave 1 change the N below 
 BASE_SEED="${BASE_SEED:-123}"
 CONDA_ENV="${CONDA_ENV:-simplefold}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RAW_NPZ_DIR="${RAW_NPZ_DIR:-${REPO_ROOT}/test_new_data_with_clusters}"
 t_values=("active" "inactive" "pas") # for denovo just need 1 for input processing
-
 
 #! for denovo
 # t_values=("active") # for denovo just need 1 for input processing
@@ -38,33 +37,12 @@ t_values=("active" "inactive" "pas") # for denovo just need 1 for input processi
 # TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/denovo_samples"
 
 
-if command -v conda >/dev/null 2>&1; then
-    eval "$(conda shell.bash hook)"
-elif [[ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]]; then
-    # shellcheck source=/dev/null
-    source "${HOME}/miniconda3/etc/profile.d/conda.sh"
-elif [[ -f "${HOME}/anaconda3/etc/profile.d/conda.sh" ]]; then
-    # shellcheck source=/dev/null
-    source "${HOME}/anaconda3/etc/profile.d/conda.sh"
-else
-    echo "Could not find conda. Load conda first or set up your shell initialization." >&2
-    exit 1
-fi
-
-conda activate "${CONDA_ENV}"
 cd "${REPO_ROOT}"
-
 for TYPE in "${t_values[@]}"; do
     RAW_NPZ_PATH="${RAW_NPZ_DIR}/${TYPE}_without_hs.npz"
     echo "Processing TYPE=${TYPE} with raw NPZ: ${RAW_NPZ_PATH}"    
-    
-    
+        
     TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/${TYPE}_samples" #! here for active inactive pas splitting
-
-    if [[ ! -f "${RAW_NPZ_PATH}" ]]; then
-        echo "Missing raw NPZ: ${RAW_NPZ_PATH}" >&2
-        exit 1
-    fi
 
     for SAMPLE_INDEX in $(seq 1 "${N}"); do
         SAMPLE_OUTPUT_DIR="${TYPE_OUTPUT_DIR}/sample_${SAMPLE_INDEX}"
@@ -79,7 +57,7 @@ for TYPE in "${t_values[@]}"; do
         # --ref-pos-mode zero \
         python scripts/sample_with_conditioning.py \
             --seed "${SEED}" \
-            -N 50 \
+            -N 5 \
             --checkpoint-path "${CHECKPOINT_PATH}" \
             --raw-npz-path "${RAW_NPZ_PATH}" \
             --output-dir "${SAMPLE_OUTPUT_DIR}" \

@@ -16,7 +16,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from eval_utils import detect_chirality, flip_pdb_coordinates  # noqa: E402
 
 
-MATCH_TOKEN = "_conditioned_eval_sampled.cif"
+MATCH_TOKEN = ".cif"
 
 
 def parse_args() -> argparse.Namespace:

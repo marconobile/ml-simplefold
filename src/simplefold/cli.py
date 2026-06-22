@@ -23,10 +23,11 @@ def main():
     parser.add_argument("--tau", type=float, default=0.1, help="Diffusion coefficient scaling factor.")
     parser.add_argument("--no_log_timesteps", action="store_true", help="Disable logarithmic timesteps.")
     parser.add_argument("--fasta_path", required=True, type=str, help="Path to the input FASTA file/directory.")
-    parser.add_argument("--nsample_per_protein", type=int, default=1, help="Number of samples to generate per protein.")
+    parser.add_argument("--nsample_per_protein", type=int, default=5, help="Number of samples to generate per protein.")
     parser.add_argument("--plddt", action="store_true", help="Enable pLDDT prediction.")
     parser.add_argument("--output_format", type=str, default="mmcif", choices=["pdb", "mmcif"], help="Output file format.")
     parser.add_argument("--backend", type=str, default='torch', choices=['torch', 'mlx'], help="Backend to run inference either torch or mlx")
+    parser.add_argument("--device_id", type=int, default=None, help="CUDA device id to use with the torch backend. Defaults to auto-selection.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument(
         "--version",

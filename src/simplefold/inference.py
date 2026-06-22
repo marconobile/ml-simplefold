@@ -50,6 +50,27 @@ ckpt_url_dict = {
 plddt_ckpt_url = "https://ml-site.cdn-apple.com/models/simplefold/plddt_module_1.6B.ckpt"
 
 
+def get_torch_device(args):
+    device_id = getattr(args, "device_id", None)
+
+    if not torch.cuda.is_available():
+        if device_id is not None:
+            raise RuntimeError("--device_id was set, but CUDA is not available.")
+        return torch.device("cpu")
+
+    if device_id is None:
+        return torch.device("cuda")
+
+    device_count = torch.cuda.device_count()
+    if device_id < 0 or device_id >= device_count:
+        raise ValueError(
+            f"Invalid --device_id {device_id}. Available CUDA device ids: "
+            f"0 to {device_count - 1}."
+        )
+
+    return torch.device(f"cuda:{device_id}")
+
+
 def get_config_path(relative_path):
     """Get the absolute path to a config file using importlib.resources."""
     try:
@@ -93,10 +114,10 @@ def initialize_folding_model(args):
 
     # load model checkpoint
     if args.backend == 'torch':
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = get_torch_device(args)
         model_config = omegaconf.OmegaConf.load(cfg_path)
         model = hydra.utils.instantiate(model_config)
-        model.load_state_dict(checkpoint, strict=True)
+        model.load_state_dict(checkpoint, strict=False)
         model = model.to(device)
     elif args.backend == 'mlx':
         device = "cpu"
@@ -132,7 +153,7 @@ def initialize_plddt_module(args, device):
     if args.backend == "torch":
         plddt_config = omegaconf.OmegaConf.load(plddt_module_path)
         plddt_out_module = hydra.utils.instantiate(plddt_config)
-        plddt_out_module.load_state_dict(plddt_checkpoint, strict=True)
+        plddt_out_module.load_state_dict(plddt_checkpoint, strict=False)
         plddt_out_module = plddt_out_module.to(device)
     elif args.backend == "mlx":
         # replace torch implementations with mlx
@@ -160,7 +181,7 @@ def initialize_plddt_module(args, device):
     if args.backend == "torch":
         plddt_latent_config = omegaconf.OmegaConf.load(plddt_latent_config_path)
         plddt_latent_module = hydra.utils.instantiate(plddt_latent_config)
-        plddt_latent_module.load_state_dict(plddt_latent_checkpoint, strict=True)
+        plddt_latent_module.load_state_dict(plddt_latent_checkpoint, strict=False)
         plddt_latent_module = plddt_latent_module.to(device)
     elif args.backend == "mlx":
         # replace torch implementations with mlx

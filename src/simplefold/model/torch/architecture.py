@@ -44,14 +44,21 @@ class FoldingDiT(nn.Module):
 
         self.time_embedder = time_embedder
 
+        self.clusters_embedding_dim = 256
         self.max_possible_global_clu_idx = 1682
         self.pad_idx = self.max_possible_global_clu_idx + 1
         self.cluster_embeddings = torch.nn.Embedding(
             self.pad_idx + 1,
-            256,
+            self.clusters_embedding_dim,
             padding_idx=self.pad_idx,
             max_norm=1.0,
         )
+
+        # self.masking_embeddings_per_residue = torch.nn.Embedding(
+        #     300, # num of residues
+        #     self.clusters_embedding_dim,
+        #     max_norm=1.0
+        # )
 
         self.atom_encoder_transformer = atom_encoder_transformer
         self.atom_decoder_transformer = atom_decoder_transformer
@@ -131,6 +138,19 @@ class FoldingDiT(nn.Module):
             c_dim=hidden_size
         )
 
+    # def apply_cluster_maksing(self, cluster_emb):
+    #     # step 1 sample masking ids
+    #     # these ids are in between 0 and 300, random sample 0-10% of masking rate
+    #     # these ids are at residue lvl
+        
+    #     # step 2 fetch the embeddings for these masking ids, shape: 
+        
+    #     # step 3 overwrite the cluster_emb with the masking embeddings at the positions where the masking ids are located
+
+    #     # return the masked cluster_emb and the mask for the loss calculation
+
+    #     pass
+
     def create_local_attn_bias(
         self, n: int, n_queries: int, n_keys: int, inf: float = 1e10, device: torch.device = None
     ) -> torch.Tensor:
@@ -178,7 +198,7 @@ class FoldingDiT(nn.Module):
 
         return atom_attn_mask
 
-    def forward(self, noised_pos, t, feats, self_cond=None):
+    def forward(self, noised_pos, t, feats, self_cond=None): # feats = batch
         B, N, _ = feats["ref_pos"].shape
         M = feats["mol_type"].shape[1]
         atom_to_token = feats["atom_to_token"].float() # [B, N, M]
@@ -188,12 +208,18 @@ class FoldingDiT(nn.Module):
             "atom_idx_and_glob_cluster_id_per_frame",
             None,
         )
-        atom_idx_and_glob_cluster_id_per_frame = torch.where(
-            atom_idx_and_glob_cluster_id_per_frame == -1,
-            torch.full_like(atom_idx_and_glob_cluster_id_per_frame, self.pad_idx),
-            atom_idx_and_glob_cluster_id_per_frame,
-        )
-        cluster_emb = self.cluster_embeddings(atom_idx_and_glob_cluster_id_per_frame.to(self.cluster_embeddings.weight.device))
+        cluster_emb = None
+        if atom_idx_and_glob_cluster_id_per_frame is not None:
+            atom_idx_and_glob_cluster_id_per_frame = torch.where(
+                atom_idx_and_glob_cluster_id_per_frame == -1,
+                torch.full_like(atom_idx_and_glob_cluster_id_per_frame, self.pad_idx),
+                atom_idx_and_glob_cluster_id_per_frame,
+            )
+            cluster_emb = self.cluster_embeddings(
+                atom_idx_and_glob_cluster_id_per_frame.to(
+                    self.cluster_embeddings.weight.device
+                )
+            )
 
         # create atom attention masks
         atom_attn_mask_enc = self.create_atom_attn_mask(
