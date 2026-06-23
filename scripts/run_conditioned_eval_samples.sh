@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Defaults:
 #   N=5
-#   t_values=(active inactive pas)
+#   STRUCTURE_TYPES=(active inactive pas)
 #   output root=/storage_common/nobilm/backmapping_pots_model/results
 #
 # Example:
@@ -24,47 +24,65 @@ CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tu
 OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/backmapping_pots_model/ft_merged_npz_from_simplefold100M_max_step_60000_fix_ref_pos_vs_ref_act_inact_pas}"
 
 # fixed
-N="${N:-1}" # leave 1 change the N below 
+N="${N:-5}"
 BASE_SEED="${BASE_SEED:-123}"
 CONDA_ENV="${CONDA_ENV:-simplefold}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RAW_NPZ_DIR="${RAW_NPZ_DIR:-${REPO_ROOT}/test_new_data_with_clusters}"
-t_values=("active" "inactive" "pas") # for denovo just need 1 for input processing
+LABELS_NPZ_PATH="${LABELS_NPZ_PATH:-}"
+STRUCTURE_TYPES=("active" "inactive" "pas") # for denovo just need 1 for input processing
 
 #! for denovo
-# t_values=("active") # for denovo just need 1 for input processing
+# STRUCTURE_TYPES=("active") # for denovo just need 1 for input processing
 # LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/sample.npz"
 # TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/denovo_samples"
 
 
 cd "${REPO_ROOT}"
-for TYPE in "${t_values[@]}"; do
+for TYPE in "${STRUCTURE_TYPES[@]}"; do
     RAW_NPZ_PATH="${RAW_NPZ_DIR}/${TYPE}_without_hs.npz"
     echo "Processing TYPE=${TYPE} with raw NPZ: ${RAW_NPZ_PATH}"    
         
     TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/${TYPE}_samples" #! here for active inactive pas splitting
+    mkdir -p "${TYPE_OUTPUT_DIR}"
 
-    for SAMPLE_INDEX in $(seq 1 "${N}"); do
-        SAMPLE_OUTPUT_DIR="${TYPE_OUTPUT_DIR}/sample_${SAMPLE_INDEX}"
-        SEED=$((BASE_SEED + SAMPLE_INDEX - 1))
+    echo "Running TYPE=${TYPE} N=${N} BASE_SEED=${BASE_SEED}"
+    echo "Output: ${TYPE_OUTPUT_DIR}"
+    
+    # LABELS_NPZ_PATH: optional. If set, Python samples N label rows.
+    # Otherwise, Python samples N random observations from RAW_NPZ_PATH.
+    cmd=(
+        python scripts/sample_with_conditioning.py
+        --seed "${BASE_SEED}" # BASE_SEED + sample_index, so 123, 124, 125, 126, 127 for N=5.
+        -N "${N}"
+        --checkpoint-path "${CHECKPOINT_PATH}"
+        --raw-npz-path "${RAW_NPZ_PATH}"
+        --output-dir "${TYPE_OUTPUT_DIR}"
+        --device "${DEVICE}"
+    )
+    if [[ -n "${LABELS_NPZ_PATH}" ]]; then
+        cmd+=(
+            --labels-npz-path "${LABELS_NPZ_PATH}"
+        )
+    fi
+    "${cmd[@]}"
 
-        mkdir -p "${SAMPLE_OUTPUT_DIR}"
+    echo "Assigning oracle clusters for TYPE=${TYPE}"
+    python scripts/assign_conditioned_eval_sample_clusters.py --base-path "${TYPE_OUTPUT_DIR}"
 
-        echo "Running TYPE=${TYPE} SAMPLE=${SAMPLE_INDEX}/${N} SEED=${SEED}"
-        echo "Output: ${SAMPLE_OUTPUT_DIR}"
-        
-        # --labels-npz-path: optional, if present used for conditioning, if not present uses structures from --raw-npz-path 
-        # --ref-pos-mode zero \
-        python scripts/sample_with_conditioning.py \
-            --seed "${SEED}" \
-            -N 5 \
-            --checkpoint-path "${CHECKPOINT_PATH}" \
-            --raw-npz-path "${RAW_NPZ_PATH}" \
-            --output-dir "${SAMPLE_OUTPUT_DIR}" \
-            --device "${DEVICE}"
-            # --labels-npz-path "${LABELS_NPZ_PATH}" \
-    done
+    echo "Comparing original conditioning vs oracle labels for TYPE=${TYPE}"
+    python scripts/compare_conditioning_to_oracle.py \
+        --base-path "${TYPE_OUTPUT_DIR}" \
+        --out-dir "${TYPE_OUTPUT_DIR}"
+
+    echo "Plotting assigned-cluster evaluation for TYPE=${TYPE}"
+    python plot_evaluation.py --base_path "${TYPE_OUTPUT_DIR}" --out_dir "${TYPE_OUTPUT_DIR}"
 done
 
-python scripts/assign_conditioned_eval_sample_clusters.py --base-path "${SAMPLE_OUTPUT_DIR}"
-python plot_evaluation.py --base_path "${SAMPLE_OUTPUT_DIR}" --out_dir "${SAMPLE_OUTPUT_DIR}"
+echo "Comparing original conditioning vs oracle labels across all structure types"
+python scripts/compare_conditioning_to_oracle.py \
+    --base-path "${OUTPUT_ROOT}" \
+    --out-dir "${OUTPUT_ROOT}"
+
+echo "Plotting assigned-cluster evaluation across all structure types"
+python plot_evaluation.py --base_path "${OUTPUT_ROOT}" --out_dir "${OUTPUT_ROOT}"

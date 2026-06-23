@@ -1,0 +1,1 @@
+name CA and resid 2 to 30 35 to 65 69 to 104 113 to 138 169 to 209 215 to 255 261 to 287 288 to 300
