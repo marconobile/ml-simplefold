@@ -45,7 +45,7 @@ class FoldingDiT(nn.Module):
         self.time_embedder = time_embedder
 
         self.clusters_embedding_dim = 256
-        self.max_possible_global_clu_idx = 1682
+        self.max_possible_global_clu_idx = 1682 # with chi2 fixed: 1176
         self.pad_idx = self.max_possible_global_clu_idx + 1
         self.cluster_embeddings = torch.nn.Embedding(
             self.pad_idx + 1,
@@ -63,7 +63,7 @@ class FoldingDiT(nn.Module):
         self.atom_encoder_transformer = atom_encoder_transformer
         self.atom_decoder_transformer = atom_decoder_transformer
 
-        self.trunk = trunk
+        self.trunk = trunk # HomgenTrunk
 
         self.hidden_size = hidden_size
         self.output_channels = output_channels
@@ -201,7 +201,7 @@ class FoldingDiT(nn.Module):
     def forward(self, noised_pos, t, feats, self_cond=None): # feats = batch
         B, N, _ = feats["ref_pos"].shape
         M = feats["mol_type"].shape[1]
-        atom_to_token = feats["atom_to_token"].float() # [B, N, M]
+        atom_to_token = feats["atom_to_token"].float() # [B, N, M]        
         atom_to_token_idx = feats["atom_to_token_idx"]
         ref_space_uid = feats["ref_space_uid"]
         atom_idx_and_glob_cluster_id_per_frame = feats.get(
@@ -210,16 +210,18 @@ class FoldingDiT(nn.Module):
         )
         cluster_emb = None
         if atom_idx_and_glob_cluster_id_per_frame is not None:
-            atom_idx_and_glob_cluster_id_per_frame = torch.where(
-                atom_idx_and_glob_cluster_id_per_frame == -1,
-                torch.full_like(atom_idx_and_glob_cluster_id_per_frame, self.pad_idx),
-                atom_idx_and_glob_cluster_id_per_frame,
+            atom_idx_and_glob_cluster_id_per_frame = torch.where( # replace all -1 to pad_idx to fetch pad embedding from self.cluster_embeddings, torch.Size([bs, n_atoms])
+                atom_idx_and_glob_cluster_id_per_frame == -1, # condition
+                torch.full_like(atom_idx_and_glob_cluster_id_per_frame, self.pad_idx), # if condition = T then at that idx replace with this
+                atom_idx_and_glob_cluster_id_per_frame, # otherwise this
             )
-            cluster_emb = self.cluster_embeddings(
+            cluster_emb = self.cluster_embeddings( # torch.Size([bs, n_atoms, clust_emb_size])
                 atom_idx_and_glob_cluster_id_per_frame.to(
                     self.cluster_embeddings.weight.device
                 )
-            )
+            ) 
+        else:
+            raise ValueError("Conditioning block not active")
 
         # create atom attention masks
         atom_attn_mask_enc = self.create_atom_attn_mask(
@@ -295,22 +297,31 @@ class FoldingDiT(nn.Module):
         # atom encoder
         atom_c_emb_enc = self.atom_enc_cond_proj(c_emb)
         atom_latent = self.context2atom_proj(atom_in)
-        atom_latent = self.atom_encoder_transformer( # og shape: torch.Size([16, 1984, 256])
+
+        # In the atom encoder we use a local attention mask that constraints atom latents to only attend to a local neighborhood 
+        # around their residue (i.e., atom tokens only attend to atom tokens of nearby residues in the sequence). 
+        atom_latent = self.atom_encoder_transformer( # og shape: torch.Size([bs, n_atoms, clust_emb_size])
             latents=atom_latent,
             c=atom_c_emb_enc,
             attention_mask=atom_attn_mask_enc,
             pos=atom_pe_pos,
-            cluster_emb=cluster_emb,
+            cluster_emb=cluster_emb, # shape: torch.Size([bs, n_atoms, clust_emb_size])
         )
-        atom_latent = self.atom2latent_proj(atom_latent)
+        atom_latent = self.atom2latent_proj(atom_latent) # [bs, natoms, emb_size]
 
         # grouping: aggregate atom tokens to residue tokens
+        # It takes the output of the atom encoder and conducts average pooling to atom tokens within the same residue to obtain residue tokens
         atom_to_token_mean = atom_to_token / (
             atom_to_token.sum(dim=1, keepdim=True) + 1e-6
         )
-        latent = torch.bmm(atom_to_token_mean.transpose(1, 2), atom_latent)
+        latent = torch.bmm(atom_to_token_mean.transpose(1, 2), atom_latent) # [bs, nres, emb_size]
         assert latent.shape[1] == M
 
+        # add grouping of clusters
+        cluster_emb_grouped = torch.bmm(atom_to_token_mean.transpose(1, 2), cluster_emb) # [bs, nres, emb_size]
+
+        # ESM2 embeddings are concatenated with the residue tokens along the channel dimension and fed into the residue trunk. 
+        # The residue trunk contains most of the parameters of the model and is where most of the compute is spent on. 
         esm_s = (self.esm_s_combine.softmax(0).unsqueeze(0) @ feats['esm_s']).squeeze(2)
         force_drop_ids = feats.get("force_drop_ids", None)
         esm_emb = self.esm_s_proj(esm_s, self.training, force_drop_ids)
@@ -319,19 +330,21 @@ class FoldingDiT(nn.Module):
         latent = self.esm_cat_proj(torch.cat([latent, esm_emb], dim=-1))
 
         # residue trunk
+        assert latent.shape[1] == 300
         latent = self.trunk(
-            latents=latent,
+            latents=latent, # torch.Size([bs, nres, emb_size])
             c=c_emb,
             attention_mask=None,
             pos=token_pe_pos,
-            atom_idx_and_glob_cluster_id_per_frame=atom_idx_and_glob_cluster_id_per_frame,
+            cluster_emb=cluster_emb_grouped
         )
 
-        # ungrouping: broadcast residue tokens to atom tokens
+        # ungrouping: broadcast residue tokens to atom tokens        
+        # i.e. replicate the same updated residue tokens to all atoms within the residue
         output = torch.bmm(atom_to_token, latent)
         assert output.shape[1] == N
 
-        # add skip connection
+        # add skip connection from the output of atom encoder to distinguish between different atoms within the same residue
         output = output + atom_latent
         output = self.latent2atom_proj(output)
 
@@ -342,7 +355,7 @@ class FoldingDiT(nn.Module):
             c=atom_c_emb_dec,
             attention_mask=atom_attn_mask_dec,
             pos=atom_pe_pos,
-            atom_idx_and_glob_cluster_id_per_frame=atom_idx_and_glob_cluster_id_per_frame,
+            cluster_emb=cluster_emb, # shape: torch.Size([bs, n_atoms, clust_emb_size])
         )
         output = self.final_layer(output, c=c_emb)
 

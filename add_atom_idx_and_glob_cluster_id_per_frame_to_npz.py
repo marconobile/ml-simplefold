@@ -1,8 +1,15 @@
+import argparse
+
 import numpy as np
 
-input_npz = '/storage_common/nobilm/backmapping_pots_model/datasets/pas/with_hs/without_hs/backmapping_dataset.npz'
-output_npz = '/home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/pas_without_hs.npz'
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--input-npz")
+parser.add_argument("--output-npz")
+args = parser.parse_args()
+
+input_npz = args.input_npz
+output_npz = args.output_npz
 
 data = dict(np.load(input_npz))
 

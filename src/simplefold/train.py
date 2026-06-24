@@ -14,6 +14,7 @@ from utils.utils import (
     extras,
     create_folders,
     normalize_runtime_paths,
+    save_run_config_report,
     task_wrapper,
 )
 from utils.instantiators import (
@@ -128,6 +129,7 @@ def submit_run(cfg):
     OmegaConf.resolve(cfg)
     normalize_runtime_paths(cfg)
     create_folders(cfg)
+    save_run_config_report(cfg)
     configure_runtime_temp_dir(cfg)
     extras(cfg)
     train(cfg)

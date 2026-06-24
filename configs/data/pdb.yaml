@@ -22,10 +22,10 @@ datasets:
       # NOTE: Records produced from `process_pdb.py` often don't have deposited/
       # released/revised dates, so a DateFilter would reject all samples.
 
-filters:
-    - _target_: boltz_data_pipeline.filter.dynamic.size.SizeFilter
-      min_chains: 1
-      max_chains: 300
+# filters:
+#     - _target_: boltz_data_pipeline.filter.dynamic.size.SizeFilter
+#       min_chains: 1
+#       max_chains: 300
 
 tokenizer:
   _target_: boltz_data_pipeline.tokenize.boltz_protein.BoltzTokenizer
@@ -38,12 +38,12 @@ featurizer:
 # # `boltz_data_pipeline.feature.symmetry.get_symmetries`.
 # symmetries: {}
 symmetries: /home/nobilm@usi.ch/ml-simplefold/symmetry.pkl
-max_tokens: 256
-max_atoms: 2304
+max_tokens: 500
+max_atoms: 3000
 pad_to_max_tokens: False
 pad_to_max_atoms: False
 batch_size: 256
-num_workers: 16
+num_workers: 32
 pin_memory: True
 return_train_symmetries: False
 min_dist: 2.0

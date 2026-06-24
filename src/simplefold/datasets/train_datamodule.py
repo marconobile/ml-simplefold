@@ -160,21 +160,21 @@ class SimpleFoldTrainingDataset(torch.utils.data.Dataset):
             print(f"No tokens in {record.id}. Skipping.")
             return self.__getitem__(random.randint(0, self.num_samples - 1))
 
-        # Compute crop
-        try:
-            max_atoms = self.max_atoms
-            max_tokens = self.max_tokens
+        # # Compute crop
+        # try:
+        #     max_atoms = self.max_atoms
+        #     max_tokens = self.max_tokens
 
-            if self.max_tokens is not None:
-                tokenized = dataset.cropper.crop(
-                    tokenized,
-                    max_atoms=max_atoms,
-                    max_tokens=max_tokens,
-                    random=np.random,
-                )
-        except Exception as e:
-            print(f"Cropper failed on {record.id} with error {e}. Skipping.")
-            return self.__getitem__(random.randint(0, self.num_samples - 1))
+        #     if self.max_tokens is not None:
+        #         tokenized = dataset.cropper.crop(
+        #             tokenized,
+        #             max_atoms=max_atoms,
+        #             max_tokens=max_tokens,
+        #             random=np.random,
+        #         )
+        # except Exception as e:
+        #     print(f"Cropper failed on {record.id} with error {e}. Skipping.")
+        #     return self.__getitem__(random.randint(0, self.num_samples - 1))
 
         sequence = extract_sequence_from_tokens(tokenized)
 
@@ -185,6 +185,8 @@ class SimpleFoldTrainingDataset(torch.utils.data.Dataset):
 
         # Compute features
         try:
+            max_tokens = None
+            max_atoms = None
             features = dataset.featurizer.process(
                 tokenized,
                 max_atoms=max_atoms if self.pad_to_max_atoms else None,

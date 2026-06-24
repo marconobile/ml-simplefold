@@ -4,7 +4,10 @@
 #
 
 import os
+import sys
+import shlex
 import tempfile
+from datetime import datetime, timezone
 import rich
 import rich.syntax
 import rich.tree
@@ -188,6 +191,96 @@ def create_folders(cfg: DictConfig) -> None:
 
     if not os.path.exists(cfg.paths.sample_dir):
         os.makedirs(cfg.paths.sample_dir)
+
+
+def _config_to_container(config: Any) -> Any:
+    """Converts an OmegaConf node to plain containers without failing on ??? values."""
+    if not OmegaConf.is_config(config):
+        return config
+
+    return OmegaConf.to_container(config, resolve=True, throw_on_missing=False)
+
+
+def _flatten_config(config: Any, prefix: str = "") -> Dict[str, Any]:
+    """Flattens nested config containers into dot-separated parameter paths."""
+    if isinstance(config, DictConfig):
+        config = _config_to_container(config)
+
+    if isinstance(config, dict):
+        items = {}
+        for key, value in config.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            items.update(_flatten_config(value, path))
+        return items
+
+    if isinstance(config, list):
+        items = {}
+        for index, value in enumerate(config):
+            path = f"{prefix}.{index}" if prefix else str(index)
+            items.update(_flatten_config(value, path))
+        return items
+
+    return {prefix: config}
+
+
+def save_run_config_report(
+    cfg: DictConfig,
+    filename: str = "run_config_report.yaml",
+) -> None:
+    """Saves the final Hydra config and launch metadata to cfg.paths.output_dir."""
+    current_rank = getattr(rank_zero_only, "rank", None)
+    if current_rank not in (None, 0):
+        return
+
+    if not cfg.get("paths") or not cfg.paths.get("output_dir"):
+        if current_rank is not None:
+            log.warning("Paths config not found! Skipping run config report.")
+        return
+
+    output_dir = Path(cfg.paths.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    hydra_report = {}
+    try:
+        hydra_cfg = HydraConfig.get()
+        runtime_cfg = hydra_cfg.get("runtime", {})
+        hydra_report = {
+            "job": _config_to_container(hydra_cfg.get("job", {})),
+            "runtime": _config_to_container(runtime_cfg),
+            "overrides": _config_to_container(hydra_cfg.get("overrides", {})),
+            "choices": _config_to_container(runtime_cfg.get("choices", {})),
+        }
+    except Exception as exc:
+        hydra_report = {"error": f"HydraConfig unavailable: {exc}"}
+
+    resolved_config = _config_to_container(cfg)
+    report = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "report_path": str(output_dir / filename),
+        "environment": {
+            "cwd": os.getcwd(),
+            "python_executable": sys.executable,
+            "conda_default_env": os.environ.get("CONDA_DEFAULT_ENV"),
+            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        },
+        "command": {
+            "argv": sys.argv,
+            "shell_escaped": " ".join(shlex.quote(arg) for arg in sys.argv),
+        },
+        "hydra": hydra_report,
+        "parameters": _flatten_config(resolved_config),
+        "resolved_config": resolved_config,
+    }
+
+    report_yaml = OmegaConf.to_yaml(
+        OmegaConf.create(report),
+        resolve=False,
+        sort_keys=False,
+    )
+    report_path = output_dir / filename
+    report_path.write_text(report_yaml, encoding="utf-8")
+    if current_rank is not None:
+        log.info(f"Saved run config report: {report_path}")
 
 
 def extras(cfg: DictConfig) -> None:

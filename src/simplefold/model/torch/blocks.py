@@ -41,8 +41,19 @@ class DiTBlock(nn.Module):
         )
         self.initialize_weights()
 
-        self.cluster_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-        torch.nn.init.normal_(self.cluster_proj.weight, mean=0.0, std=1e-6)
+        self.clusters_embedding_dim = 256 # as in architecture.py
+        self.cluster_proj = nn.Sequential(
+            nn.Linear(self.clusters_embedding_dim, hidden_size, bias=True),
+            nn.LayerNorm(hidden_size, eps=1e-05, elementwise_affine=True),
+        )
+
+        # Initialize the Linear's learnable parameters to very low
+        torch.nn.init.normal_(self.cluster_proj[0].weight, mean=0.0, std=1e-6)
+        torch.nn.init.normal_(self.cluster_proj[0].bias, mean=0.0, std=1e-6)
+        
+        # Initialize the LayerNorm's learnable parameters to very low
+        torch.nn.init.constant_(self.cluster_proj[1].weight, 1e-6)
+        torch.nn.init.zeros_(self.cluster_proj[1].bias)
 
     def initialize_weights(self):
         # Initialize transformer layers:
@@ -72,9 +83,10 @@ class DiTBlock(nn.Module):
                 self.adaLN_modulation(c).chunk(6, dim=-1) # in_dims of c: (bs, emb_dim)
             )
         else:
-            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = ( # all out shapes are: ((bs, emb_dim)
-                self.adaLN_modulation(c).chunk(6, dim=1) # in_dims of c: (bs, emb_dim)
-            )
+            raise ValueError("Conditioning block not active")
+            # shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = ( # all out shapes are: ((bs, emb_dim)
+            #     self.adaLN_modulation(c).chunk(6, dim=1) # in_dims of c: (bs, emb_dim)
+            # )
 
         _latents = self.attn(
             modulate(self.norm1(latents), shift_msa, scale_msa), # modulate broadcasts at atoms shape: out_dims: (bs, natoms, emb_dim)
