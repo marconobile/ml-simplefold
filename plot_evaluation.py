@@ -18,8 +18,7 @@ import numpy as np  # noqa: E402
 
 
 DEFAULT_REF_NPZ = Path(
-    "/storage_common/angiod/phase-data/projects/a2a/systems/a2a/clusters/"
-    "cb3c3cae-5316-47db-8fbb-0567d5f0f75b/cluster.npz"
+    "/storage_common/angiod/phase-data/projects/a2a/systems/a2a_small/clusters/6d4a7baa-c096-494e-b417-c8014437d37d/cluster.npz"
 )
 MATCH_TOKEN = "_assigned_clusters.npz"
 IDX_RE = re.compile(r"(?:^|_)(\d+)_assigned_clusters\.npz$")
@@ -38,6 +37,10 @@ SOURCE_COLORS = {
     "inactive": "#d62728",
     "pas": "#2ca02c",
 }
+
+
+def normalize_source_type(source_type: str) -> str:
+    return str(source_type).split("_", 1)[0]
 
 
 def parse_args() -> argparse.Namespace:
@@ -244,7 +247,7 @@ def build_reference_row_lookup(ref_data: np.lib.npyio.NpzFile) -> dict[tuple[str
 
     lookup: dict[tuple[str, int], int] = {}
     for row_idx, (state_id, frame_idx) in enumerate(zip(state_ids, frame_indices, strict=True)):
-        key = (str(state_id), int(frame_idx))
+        key = (normalize_source_type(str(state_id)), int(frame_idx))
         if key in lookup:
             raise ValueError(
                 f"Reference NPZ contains duplicate rows for state={state_id!r}, "

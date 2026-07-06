@@ -19,18 +19,27 @@ set -euo pipefail
 # pas: /home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/pas_without_hs.npz
 
 # check for changes
-DEVICE="${DEVICE:-cuda:3}"
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/ft_merged_npz_from_simplefold100M_max_step_600k_fix_ref_pos/checkpoints/last.ckpt}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/backmapping_pots_model/ft_merged_npz_from_simplefold100M_max_step_60000_fix_ref_pos_vs_ref_act_inact_pas}"
+DEVICE="${DEVICE:-cuda:1}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_active_only_newchi2_fixed_refpos/checkpoints/last.ckpt}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/backmapping_pots_model/finetune_simplefold100M_active_only_newchi2_fixed_refpos}"
 
 # fixed
 N="${N:-5}"
 BASE_SEED="${BASE_SEED:-123}"
 CONDA_ENV="${CONDA_ENV:-simplefold}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RAW_NPZ_DIR="${RAW_NPZ_DIR:-${REPO_ROOT}/test_new_data_with_clusters}"
+
+
+# RAW_NPZ_DIR="${RAW_NPZ_DIR:-${REPO_ROOT}/test_new_data_with_clusters}"
+# RAW_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/active/with_hs/active_NECA_G_protein_4000_frames_chi2fixed/without_hs/active_NECA_G_protein_4000_frames_chi2fixed_with_globalclusters.npz"
+RAW_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/active/with_hs/active_NECA_G_protein_4000_frames_chi2fixed/without_hs/active_without_hs.npz" # copy of above
+
+
 LABELS_NPZ_PATH="${LABELS_NPZ_PATH:-}"
-STRUCTURE_TYPES=("active" "inactive" "pas") # for denovo just need 1 for input processing
+
+
+STRUCTURE_TYPES=("active") # "inactive" "pas") # for denovo just need 1 for input processing
+
 
 #! for denovo
 # STRUCTURE_TYPES=("active") # for denovo just need 1 for input processing
@@ -40,7 +49,7 @@ STRUCTURE_TYPES=("active" "inactive" "pas") # for denovo just need 1 for input p
 
 cd "${REPO_ROOT}"
 for TYPE in "${STRUCTURE_TYPES[@]}"; do
-    RAW_NPZ_PATH="${RAW_NPZ_DIR}/${TYPE}_without_hs.npz"
+    # RAW_NPZ_PATH="${RAW_NPZ_DIR}/${TYPE}_without_hs.npz"
     echo "Processing TYPE=${TYPE} with raw NPZ: ${RAW_NPZ_PATH}"    
         
     TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/${TYPE}_samples" #! here for active inactive pas splitting

@@ -17,8 +17,9 @@ DEFAULT_PHASE_ROOT = Path("/home/nobilm@usi.ch/PHASE")
 DEFAULT_PHASE_PYTHON = DEFAULT_PHASE_ROOT / ".venv-phase" / "bin" / "python"
 DEFAULT_ASSIGN_SCRIPT = DEFAULT_PHASE_ROOT / "scripts" / "assign_custom_structure_clusters.py"
 DEFAULT_CLUSTER_DIR = Path(
-    "/storage_common/angiod/phase-data/projects/a2a/systems/a2a/clusters/"
-    "cb3c3cae-5316-47db-8fbb-0567d5f0f75b/"
+    # "/storage_common/angiod/phase-data/projects/a2a/systems/a2a/clusters/"
+    # "cb3c3cae-5316-47db-8fbb-0567d5f0f75b/"
+    "/storage_common/angiod/phase-data/projects/a2a/systems/a2a_small/clusters/6d4a7baa-c096-494e-b417-c8014437d37d/"
 )
 DEFAULT_MATCH_TOKENS = (
     "_conditioned_eval_sampled.npz",
