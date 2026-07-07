@@ -34,6 +34,9 @@ class FoldingDiT(nn.Module):
         esm_model="esm2_3B",
         esm_dropout_prob=0.0,
         use_atom_mask=False,
+        use_conditioning_masking=False,
+        cluster_mask_prob=0.15,
+        conditioning_dropout_prob=0.0,
         use_length_condition=True,
     ):
         super().__init__()
@@ -46,9 +49,19 @@ class FoldingDiT(nn.Module):
 
         self.clusters_embedding_dim = 256
         self.max_possible_global_clu_idx = 1682 # with chi2 fixed: 1176
+        self.num_cluster_classes = self.max_possible_global_clu_idx + 1
         self.pad_idx = self.max_possible_global_clu_idx + 1
+        self.use_conditioning_masking = use_conditioning_masking
+        self.cluster_mask_prob = cluster_mask_prob
+        self.conditioning_dropout_prob = conditioning_dropout_prob
+        if self.use_conditioning_masking:
+            self.mask_idx = self.pad_idx + 1
+            num_cluster_embeddings = self.mask_idx + 1
+        else:
+            self.mask_idx = None
+            num_cluster_embeddings = self.pad_idx + 1
         self.cluster_embeddings = torch.nn.Embedding(
-            self.pad_idx + 1,
+            num_cluster_embeddings,
             self.clusters_embedding_dim,
             padding_idx=self.pad_idx,
             max_norm=1.0,
@@ -138,18 +151,94 @@ class FoldingDiT(nn.Module):
             c_dim=hidden_size
         )
 
-    # def apply_cluster_maksing(self, cluster_emb):
-    #     # step 1 sample masking ids
-    #     # these ids are in between 0 and 300, random sample 0-10% of masking rate
-    #     # these ids are at residue lvl
-        
-    #     # step 2 fetch the embeddings for these masking ids, shape: 
-        
-    #     # step 3 overwrite the cluster_emb with the masking embeddings at the positions where the masking ids are located
+        if self.use_conditioning_masking:
+            self.cluster_mlm_head = nn.Linear(hidden_size, self.num_cluster_classes)
+        else:
+            self.cluster_mlm_head = None
 
-    #     # return the masked cluster_emb and the mask for the loss calculation
+    def get_effective_cluster_mask_prob(self):
+        if not self.use_conditioning_masking or not self.training:
+            return 0.0
+        return min(max(float(self.cluster_mask_prob), 0.0), 1.0)
 
-    #     pass
+    def get_effective_conditioning_dropout_prob(self):
+        if not self.training:
+            return 0.0
+        return min(max(float(self.conditioning_dropout_prob), 0.0), 1.0)
+
+    def apply_conditioning_dropout(self, cluster_input_ids):
+        conditioning_dropout_prob = self.get_effective_conditioning_dropout_prob()
+        if conditioning_dropout_prob <= 0.0:
+            return cluster_input_ids, None
+
+        drop_conditioning = (
+            torch.rand(
+                cluster_input_ids.shape[0],
+                device=cluster_input_ids.device,
+            )
+            < conditioning_dropout_prob
+        )
+        if not torch.any(drop_conditioning):
+            return cluster_input_ids, drop_conditioning
+
+        cluster_input_ids = cluster_input_ids.masked_fill(
+            drop_conditioning[:, None],
+            self.pad_idx,
+        )
+        return cluster_input_ids, drop_conditioning
+
+    def apply_cluster_masking(
+        self,
+        cluster_input_ids,
+        atom_cluster_targets,
+        atom_to_token,
+        atom_pad_mask,
+        drop_conditioning=None,
+    ):
+        cluster_mask_prob = self.get_effective_cluster_mask_prob()
+        if cluster_mask_prob <= 0.0:
+            return cluster_input_ids, None
+
+        valid_atom_mask = (atom_cluster_targets >= 0) & atom_pad_mask.bool()
+        atom_to_token = atom_to_token.to(device=cluster_input_ids.device)
+
+        valid_atom_counts = torch.bmm(
+            atom_to_token.transpose(1, 2),
+            valid_atom_mask.float().unsqueeze(-1),
+        ).squeeze(-1)
+        valid_residue_mask = valid_atom_counts > 0
+        if drop_conditioning is not None:
+            valid_residue_mask = valid_residue_mask & ~drop_conditioning[:, None]
+
+        safe_atom_targets = atom_cluster_targets.masked_fill(~valid_atom_mask, 0)
+        residue_cluster_targets = torch.bmm(
+            atom_to_token.transpose(1, 2),
+            safe_atom_targets.float().unsqueeze(-1),
+        ).squeeze(-1)
+        residue_cluster_targets = (
+            residue_cluster_targets / valid_atom_counts.clamp(min=1.0)
+        ).round().long()
+
+        residue_mask = (
+            torch.rand(
+                residue_cluster_targets.shape,
+                device=residue_cluster_targets.device,
+            )
+            < cluster_mask_prob
+        ) & valid_residue_mask
+
+        atom_mask = torch.bmm(
+            atom_to_token,
+            residue_mask.float().unsqueeze(-1),
+        ).squeeze(-1).bool()
+        atom_mask = atom_mask & valid_atom_mask
+
+        cluster_input_ids = cluster_input_ids.masked_fill(atom_mask, self.mask_idx)
+        cluster_mlm_targets = residue_cluster_targets.masked_fill(
+            ~residue_mask,
+            -100,
+        )
+        return cluster_input_ids, cluster_mlm_targets
 
     def create_local_attn_bias(
         self, n: int, n_queries: int, n_keys: int, inf: float = 1e10, device: torch.device = None
@@ -209,19 +298,34 @@ class FoldingDiT(nn.Module):
             None,
         )
         cluster_emb = None
+        cluster_mlm_targets = None
+        drop_conditioning = None
         if atom_idx_and_glob_cluster_id_per_frame is not None:
-            atom_idx_and_glob_cluster_id_per_frame = torch.where( # replace all -1 to pad_idx to fetch pad embedding from self.cluster_embeddings, torch.Size([bs, n_atoms])
-                atom_idx_and_glob_cluster_id_per_frame == -1, # condition
-                torch.full_like(atom_idx_and_glob_cluster_id_per_frame, self.pad_idx), # if condition = T then at that idx replace with this
-                atom_idx_and_glob_cluster_id_per_frame, # otherwise this
+            atom_cluster_targets = atom_idx_and_glob_cluster_id_per_frame.to(
+                self.cluster_embeddings.weight.device
+            ).long()
+            cluster_input_ids = torch.where( # replace all -1 to pad_idx to fetch pad embedding from self.cluster_embeddings, torch.Size([bs, n_atoms])
+                atom_cluster_targets == -1, # condition
+                torch.full_like(atom_cluster_targets, self.pad_idx), # if condition = T then at that idx replace with this
+                atom_cluster_targets, # otherwise this
             )
-            cluster_emb = self.cluster_embeddings( # torch.Size([bs, n_atoms, clust_emb_size])
-                atom_idx_and_glob_cluster_id_per_frame.to(
-                    self.cluster_embeddings.weight.device
+            cluster_input_ids, drop_conditioning = self.apply_conditioning_dropout(
+                cluster_input_ids
+            )
+            if self.use_conditioning_masking:
+                cluster_input_ids, cluster_mlm_targets = self.apply_cluster_masking(
+                    cluster_input_ids=cluster_input_ids,
+                    atom_cluster_targets=atom_cluster_targets,
+                    atom_to_token=atom_to_token,
+                    atom_pad_mask=feats["atom_pad_mask"].to(cluster_input_ids.device),
+                    drop_conditioning=drop_conditioning,
                 )
+            cluster_emb = self.cluster_embeddings( # torch.Size([bs, n_atoms, clust_emb_size])
+                cluster_input_ids
             ) 
         else:
             raise ValueError("Conditioning block not active")
+            cluster_emb = None # after on purpose            
 
         # create atom attention masks
         atom_attn_mask_enc = self.create_atom_attn_mask(
@@ -318,7 +422,11 @@ class FoldingDiT(nn.Module):
         assert latent.shape[1] == M
 
         # add grouping of clusters
-        cluster_emb_grouped = torch.bmm(atom_to_token_mean.transpose(1, 2), cluster_emb) # [bs, nres, emb_size]
+        if cluster_emb is not None:
+            cluster_emb_grouped = torch.bmm(atom_to_token_mean.transpose(1, 2), cluster_emb) # [bs, nres, emb_size]
+        else:
+            raise ValueError("Conditioning block not active")
+            cluster_emb_grouped = None # after on purpose
 
         # ESM2 embeddings are concatenated with the residue tokens along the channel dimension and fed into the residue trunk. 
         # The residue trunk contains most of the parameters of the model and is where most of the compute is spent on. 
@@ -338,6 +446,9 @@ class FoldingDiT(nn.Module):
             pos=token_pe_pos,
             cluster_emb=cluster_emb_grouped
         )
+        cluster_logits = None
+        if self.cluster_mlm_head is not None and cluster_mlm_targets is not None:
+            cluster_logits = self.cluster_mlm_head(latent)
 
         # ungrouping: broadcast residue tokens to atom tokens        
         # i.e. replicate the same updated residue tokens to all atoms within the residue
@@ -359,7 +470,12 @@ class FoldingDiT(nn.Module):
         )
         output = self.final_layer(output, c=c_emb)
 
-        return {
+        out_dict = {
             "predict_velocity": output,
             "latent": latent,
         }
+        if cluster_logits is not None:
+            out_dict["cluster_logits"] = cluster_logits
+            out_dict["cluster_mlm_targets"] = cluster_mlm_targets
+
+        return out_dict

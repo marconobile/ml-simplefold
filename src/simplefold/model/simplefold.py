@@ -82,6 +82,7 @@ class SimpleFold(pl.LightningModule):
         aa_bolt_link=None,
         use_rigid_align=True,
         smooth_lddt_loss_weight=1.0,
+        cluster_mlm_loss_weight=0.05,
         lddt_cutoff=15.0,
         clip_grad_norm_val=None,
         lddt_weight_schedule=False,
@@ -109,6 +110,7 @@ class SimpleFold(pl.LightningModule):
         self.lddt_cutoff = lddt_cutoff
         self.smooth_lddt_loss_weight = smooth_lddt_loss_weight
         self.use_smooth_lddt_loss = smooth_lddt_loss_weight > 0.0
+        self.cluster_mlm_loss_weight = cluster_mlm_loss_weight
         self.lddt_weight_schedule = lddt_weight_schedule
         self.plddt_training = plddt_training
         self.sample_dir = sample_dir
@@ -429,6 +431,30 @@ class SimpleFold(pl.LightningModule):
             prog_bar=True,
             rank_zero_only=True,
         )
+
+        cluster_logits = out_dict.get("cluster_logits", None)
+        cluster_mlm_targets = out_dict.get("cluster_mlm_targets", None)
+        if (
+            self.cluster_mlm_loss_weight > 0.0
+            and cluster_logits is not None
+            and cluster_mlm_targets is not None
+            and torch.any(cluster_mlm_targets != -100)
+        ):
+            cluster_mlm_loss = F.cross_entropy(
+                cluster_logits.reshape(-1, cluster_logits.shape[-1]),
+                cluster_mlm_targets.reshape(-1),
+                ignore_index=-100,
+            )
+            loss = loss + self.cluster_mlm_loss_weight * cluster_mlm_loss
+
+            self.log(
+                "loss/cluster_mlm",
+                cluster_mlm_loss.item(),
+                on_epoch=True,
+                logger=True,
+                prog_bar=True,
+                rank_zero_only=True,
+            )
 
         if self.use_smooth_lddt_loss:
             # one-step Euler to get denoised coordinates

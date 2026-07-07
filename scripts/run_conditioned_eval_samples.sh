@@ -19,9 +19,9 @@ set -euo pipefail
 # pas: /home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/pas_without_hs.npz
 
 # check for changes
-DEVICE="${DEVICE:-cuda:1}"
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_active_only_newchi2_fixed_refpos/checkpoints/last.ckpt}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/backmapping_pots_model/finetune_simplefold100M_active_only_newchi2_fixed_refpos}"
+DEVICE="${DEVICE:-cuda:0}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_active_only_newchi2_fixed_refpos_600k/checkpoints/last.ckpt}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/backmapping_pots_model/finetune_simplefold100M_active_only_newchi2_fixed_refpos_600kitrs_conditioned_eval_samples}"
 
 # fixed
 N="${N:-5}"

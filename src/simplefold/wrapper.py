@@ -93,7 +93,7 @@ class ModelWrapper:
         if self.backend == "torch":
             model_config = omegaconf.OmegaConf.load(cfg_path)
             model = hydra.utils.instantiate(model_config)
-            model.load_state_dict(checkpoint, strict=True)
+            model.load_state_dict(checkpoint, strict=False)
             model = model.to(self.device)
         elif self.backend == "mlx":
             # replace torch implementations with mlx
@@ -206,12 +206,14 @@ class InferenceWrapper:
         tau,
         device,
         backend,
+        guidance_scale=1.0,
     ):
         self.num_steps = num_steps
         self.nsample_per_protein = nsample_per_protein
         self.tau = tau
         self.device = device
         self.backend = backend
+        self.guidance_scale = guidance_scale
 
         if self.backend == "mlx" and not MLX_AVAILABLE:
             self.backend = "torch"
@@ -282,13 +284,18 @@ class InferenceWrapper:
         elif self.backend == "mlx":
             sampler_cls = EMSamplerMLX
 
-        self.sampler = sampler_cls(
-            num_timesteps=self.num_steps,
-            t_start=1e-4,
-            tau=self.tau,
-            log_timesteps=True,
-            w_cutoff=0.99,
-        )
+        sampler_kwargs = {
+            "num_timesteps": self.num_steps,
+            "t_start": 1e-4,
+            "tau": self.tau,
+            "log_timesteps": True,
+            "w_cutoff": 0.99,
+        }
+        if self.backend == "torch":
+            sampler_kwargs["guidance_scale"] = self.guidance_scale
+            sampler_kwargs["conditioning_key"] = "atom_idx_and_glob_cluster_id_per_frame"
+
+        self.sampler = sampler_cls(**sampler_kwargs)
 
     def process_input(self, aa_seq):
         # process fasta files to input format

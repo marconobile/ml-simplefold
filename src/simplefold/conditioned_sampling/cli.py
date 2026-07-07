@@ -145,6 +145,15 @@ def parse_args() -> argparse.Namespace:
         help="EMSampler tau value.",
     )
     parser.add_argument(
+        "--guidance-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Classifier-free guidance scale for cluster conditioning. "
+            "1.0 disables the extra unconditional pass."
+        ),
+    )
+    parser.add_argument(
         "--scale",
         type=float,
         default=16.0,

@@ -3,6 +3,7 @@ ema_decay: 0.999
 clip_grad_norm_val: 2.0
 use_rigid_align: True
 smooth_lddt_loss_weight: 1.0
+cluster_mlm_loss_weight: 0.05
 lddt_cutoff: 15.0
 esm_model: "esm2_3B"
 lddt_weight_schedule: False

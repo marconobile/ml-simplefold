@@ -21,7 +21,7 @@ class EMSampler():
         log_timesteps=False,
         w_cutoff=0.99,
         guidance_scale=1.0,
-        conditioning_key="c",
+        conditioning_key="atom_idx_and_glob_cluster_id_per_frame",
     ):
         self.num_timesteps = num_timesteps
         self.log_timesteps = log_timesteps
@@ -41,6 +41,24 @@ class EMSampler():
                 self.t_start, 1.0, steps=self.num_timesteps + 1
             )
 
+    def create_unconditioned_batch(self, batch):
+        if not isinstance(batch, dict) or self.conditioning_key not in batch:
+            return None
+
+        unconditioned_batch = dict(batch)
+        unconditioned_batch[self.conditioning_key] = torch.full_like(
+            batch[self.conditioning_key],
+            -1,
+        )
+        return unconditioned_batch
+
+    def should_use_guidance(self, batch_uncond=None, model_fn_conditioned=None, c=None):
+        if self.guidance_scale is None or float(self.guidance_scale) == 1.0:
+            return False
+        return batch_uncond is not None or (
+            model_fn_conditioned is not None and c is not None
+        )
+
     def diffusion_coefficient(self, t, eps=0.01):
         # determine diffusion coefficient
         w = (1.0 - t) / (t + eps)
@@ -57,6 +75,7 @@ class EMSampler():
         t, 
         t_next, 
         batch, 
+        batch_uncond=None,
         model_fn_conditioned=None,
         c=None,
     ):
@@ -71,18 +90,31 @@ class EMSampler():
         )
 
         batched_t = repeat(t, " -> b", b=y.shape[0])
-        velocity_uncond = model_fn(
-            noised_pos=y,
-            t=batched_t,
-            feats=batch,
-        )['predict_velocity']
-
-        use_guidance = (
-            model_fn_conditioned is not None
-            and c is not None
-            and self.guidance_scale is not None
+        use_guidance = self.should_use_guidance(
+            batch_uncond=batch_uncond,
+            model_fn_conditioned=model_fn_conditioned,
+            c=c,
         )
-        if use_guidance:
+        if use_guidance and batch_uncond is not None:
+            velocity_uncond = model_fn(
+                noised_pos=y,
+                t=batched_t,
+                feats=batch_uncond,
+            )["predict_velocity"]
+            velocity_cond = model_fn(
+                noised_pos=y,
+                t=batched_t,
+                feats=batch,
+            )["predict_velocity"]
+            velocity = velocity_uncond + self.guidance_scale * (
+                velocity_cond - velocity_uncond
+            )
+        elif use_guidance:
+            velocity_uncond = model_fn(
+                noised_pos=y,
+                t=batched_t,
+                feats=batch,
+            )["predict_velocity"]
             if hasattr(c, "to"):
                 c = c.to(y)
             velocity_cond = model_fn_conditioned(
@@ -95,7 +127,11 @@ class EMSampler():
                 velocity_cond - velocity_uncond
             )
         else:
-            velocity = velocity_uncond
+            velocity = model_fn(
+                noised_pos=y,
+                t=batched_t,
+                feats=batch,
+            )["predict_velocity"]
 
         score = flow.compute_score_from_velocity(velocity, y, t)
 
@@ -120,6 +156,7 @@ class EMSampler():
         steps = self.steps.to(noise.device)
         y_sampled = noise
         feats = batch
+        batch_uncond = self.create_unconditioned_batch(feats)
         if c is None and isinstance(feats, dict):
             c = feats.get(self.conditioning_key, None)
 
@@ -138,6 +175,7 @@ class EMSampler():
                 t,
                 t_next,
                 feats,
+                batch_uncond=batch_uncond,
                 model_fn_conditioned=model_fn_conditioned,
                 c=c,
             )

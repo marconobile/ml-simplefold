@@ -4,3 +4,5 @@ t_start: 1e-4
 tau: 0.3
 log_timesteps: True
 w_cutoff: 0.99
+guidance_scale: 1.0
+conditioning_key: atom_idx_and_glob_cluster_id_per_frame

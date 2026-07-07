@@ -48,6 +48,8 @@ model:
 
   architecture:
     esm_model: ${model.esm_model}
+    # use_conditioning_masking: True
+    # cluster_mask_prob: 0.15
 
   processor:
     scale: 16.0

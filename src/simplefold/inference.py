@@ -242,13 +242,18 @@ def initialize_others(args, device):
     elif args.backend == "mlx":
         sampler_cls = EMSamplerMLX
 
-    sampler = sampler_cls(
-        num_timesteps=args.num_steps,
-        t_start=1e-4,
-        tau=args.tau,
-        log_timesteps=True,
-        w_cutoff=0.99,
-    )
+    sampler_kwargs = {
+        "num_timesteps": args.num_steps,
+        "t_start": 1e-4,
+        "tau": args.tau,
+        "log_timesteps": True,
+        "w_cutoff": 0.99,
+    }
+    if args.backend == "torch":
+        sampler_kwargs["guidance_scale"] = getattr(args, "guidance_scale", 1.0)
+        sampler_kwargs["conditioning_key"] = "atom_idx_and_glob_cluster_id_per_frame"
+
+    sampler = sampler_cls(**sampler_kwargs)
     return tokenizer, featurizer, processor, flow, sampler
 
 

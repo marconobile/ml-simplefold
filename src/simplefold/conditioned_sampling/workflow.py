@@ -106,6 +106,8 @@ def main() -> None:
     args = parse_args()
     if args.num_steps <= 0:
         raise ValueError("--num-steps must be > 0")
+    if args.guidance_scale < 0:
+        raise ValueError("--guidance-scale must be >= 0")
     if args.num_samples is not None and args.num_samples <= 0:
         raise ValueError("-N/--num-samples must be > 0")
     if args.dihedral_angle_bins <= 0:
@@ -266,6 +268,8 @@ def main() -> None:
         tau=args.tau,
         log_timesteps=True,
         w_cutoff=0.99,
+        guidance_scale=args.guidance_scale,
+        conditioning_key=CLUSTER_KEY,
     )
 
     if conditioning_label_rows is None:

@@ -84,9 +84,11 @@ class DiTBlock(nn.Module):
             )
         else:
             raise ValueError("Conditioning block not active")
-            # shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = ( # all out shapes are: ((bs, emb_dim)
-            #     self.adaLN_modulation(c).chunk(6, dim=1) # in_dims of c: (bs, emb_dim)
-            # )
+            # after on purpose
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = ( # all out shapes are: ((bs, emb_dim)
+                self.adaLN_modulation(c).chunk(6, dim=1) # in_dims of c: (bs, emb_dim)
+            )                        
+
 
         _latents = self.attn(
             modulate(self.norm1(latents), shift_msa, scale_msa), # modulate broadcasts at atoms shape: out_dims: (bs, natoms, emb_dim)
