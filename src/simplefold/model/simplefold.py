@@ -776,10 +776,13 @@ class SimpleFold(pl.LightningModule):
         if not isinstance(
             self.trainer.strategy, lightning.pytorch.strategies.fsdp.FSDPStrategy
         ):
-            self.training_gpus = checkpoint["hyper_parameters"]["training_gpus"]
-            self.fwd_flops = checkpoint["hyper_parameters"]["fwd_flops"]
+            checkpoint_hparams = checkpoint.get("hyper_parameters") or {}
+            if "training_gpus" in checkpoint_hparams:
+                self.training_gpus = checkpoint_hparams["training_gpus"]
+            if "fwd_flops" in checkpoint_hparams:
+                self.fwd_flops = checkpoint_hparams["fwd_flops"]
 
-        if checkpoint["loops"] is not None:
+        if checkpoint.get("loops") is not None:
 
             self.trainer.fit_loop.load_state_dict(checkpoint["loops"]["fit_loop"])
             self.trainer.validate_loop.load_state_dict(

@@ -20,8 +20,8 @@ set -euo pipefail
 
 # check for changes
 DEVICE="${DEVICE:-cuda:0}"
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_active_only_newchi2_fixed_refpos_600k/checkpoints/last.ckpt}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/backmapping_pots_model/finetune_simplefold100M_active_only_newchi2_fixed_refpos_600kitrs_conditioned_eval_samples}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/checkpoints/last.ckpt}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/samples}"
 
 # fixed
 N="${N:-5}"
@@ -68,6 +68,7 @@ for TYPE in "${STRUCTURE_TYPES[@]}"; do
         --raw-npz-path "${RAW_NPZ_PATH}"
         --output-dir "${TYPE_OUTPUT_DIR}"
         --device "${DEVICE}"
+        --guidance-scale 3.0
     )
     if [[ -n "${LABELS_NPZ_PATH}" ]]; then
         cmd+=(
