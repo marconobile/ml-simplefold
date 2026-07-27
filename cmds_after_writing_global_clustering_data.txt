@@ -51,17 +51,17 @@ PATH=/home/nobilm@usi.ch/miniconda3/envs/simplefold/bin:$PATH \
 CUDA_VISIBLE_DEVICES=0 \
 /home/nobilm@usi.ch/miniconda3/envs/simplefold/bin/python src/simplefold/train.py \
   experiment=train \
-  hydra.job.name=finetune_simplefold100M_active_only_newchi2_fixed_refpos \
-  paths.output_dir=/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_active_only_newchi2_fixed_refpos \
-  paths.tmp_dir=/tmp/finetune_simplefold100M_active_only_newchi2_fixed_refpos \
+  hydra.job.name=finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged \
+  paths.output_dir=/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged_v0 \
+  paths.tmp_dir=/tmp/tmp \
   +load_ckpt_path=/home/nobilm@usi.ch/ml-simplefold/artifacts/simplefold_100M.ckpt \
   trainer.accelerator=gpu \
   trainer.devices=1 \
-  data.datasets.0.target_dir=/scratch/nobilm/quantum_backmapping/new_data_chi2fixed/active_only_4k_frames \
-  data.datasets.0.tokenized_dir=/scratch/nobilm/quantum_backmapping/new_data_chi2fixed/active_only_4k_frames \
-  data.datasets.0.manifest_path=/scratch/nobilm/quantum_backmapping/new_data_chi2fixed/active_only_4k_frames/manifest.json \
-  callbacks.model_checkpoint.dirpath=/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_active_only_newchi2_fixed_refpos/checkpoints \
-  "callbacks.model_checkpoint.filename='finetune_simplefold100M_active_only_newchi2_fixed_refpos-quick-ft-ep{epoch:04d}-step{step:08d}'" \
+  data.datasets.0.target_dir=/scratch/nobilm/quantum_backmapping/ANECAG_THEO_INZMA_INACTIVE_merged \
+  data.datasets.0.tokenized_dir=/scratch/nobilm/quantum_backmapping/ANECAG_THEO_INZMA_INACTIVE_merged \
+  data.datasets.0.manifest_path=/scratch/nobilm/quantum_backmapping/ANECAG_THEO_INZMA_INACTIVE_merged/manifest.json \
+  callbacks.model_checkpoint.dirpath=/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/checkpoints \
+  "callbacks.model_checkpoint.filename='finetune_simplefold100M_finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged-quick-ft-ep{epoch:04d}-step{step:08d}'" \
   +callbacks.model_checkpoint.every_n_epochs=1 \
   callbacks.model_checkpoint.save_on_train_epoch_end=True \
   callbacks.model_checkpoint.every_n_train_steps=null \
@@ -70,16 +70,16 @@ CUDA_VISIBLE_DEVICES=0 \
   model.optimizer.lr=1e-4 \
   model.scheduler._target_=utils.lr_scheduler.LinearWarmupCosineAnnealingLR \
   model.scheduler._partial_=true \
-  model.scheduler.min_lr=1e-6 \
+  model.scheduler.min_lr=5e-7 \
   model.scheduler.max_lr=1e-4 \
-  model.scheduler.warmup_steps=2500 \
-  +model.scheduler.T_max=150000 \
-  +model.scheduler.eta_min=5e-6 \
-  trainer.max_steps=150000 \
+  model.scheduler.warmup_steps=10000 \
+  +model.scheduler.T_max=850000 \
+  +model.scheduler.eta_min=5e-7 \
+  trainer.max_steps=900000 \
   model.cluster_mlm_loss_weight=0.05 \
   model.architecture.use_conditioning_masking=True \
   model.architecture.cluster_mask_prob=0.15 \
-  model.architecture.conditioning_dropout_prob=0.15
+  model.architecture.conditioning_dropout_prob=0.1
 
 
 # model.architecture.conditioning_dropout_prob=0.3 means the conditioning is dropped 30% of the time.
@@ -93,7 +93,8 @@ CUDA_VISIBLE_DEVICES=0 \
 
 
 
-
+# Training stop condition: trainer.max_steps=550000
+# LR schedule horizon: model.scheduler.T_max=600000
 
 # warmup params
 model.scheduler.warmup_steps=500 \
@@ -119,6 +120,23 @@ python scripts/sample_with_conditioning.py \
   --guidance-scale 2.0
 
 
+TAU:
+tau controls the amount of random diffusion noise injected at every Euler–Maruyama sampling step. The default is 0.3 ([cli.py (line 141)](/home/nobilm@usi.ch/ml-simplefold/src/simplefold/conditioned_sampling/cli.py:141)).
+The stochastic update contains:
+\[
+\sqrt{2\,\Delta t\,D(t)\,\tau}\;\epsilon
+\]where \(D(t)\) is the time-dependent diffusion coefficient and \(\epsilon\) is Gaussian noise ([sampler.py (line 136)](/home/nobilm@usi.ch/ml-simplefold/src/simplefold/model/torch/sampler.py:136)).
+Therefore:
+tau = 0: deterministic sampling; no random noise is added.
+Smaller tau: less stochasticity and more reproducible/similar structures.
+Larger tau: more noise and potentially more diverse structures.
+Noise amplitude scales as \(\sqrt{\tau}\), so quadrupling tau doubles the injected noise amplitude.
+It does not directly control conditioning strength—that is --guidance-scale. tau controls sampler stochasticity while the cluster conditioning still guides the generated structure. The entry script delegates this argument to the conditioned workflow, which passes it into EMSampler ([workflow.py (line 264)](/home/nobilm@usi.ch/ml-simplefold/src/simplefold/conditioned_sampling/workflow.py:264)).  
+
+
+###########
+cd /home/nobilm@usi.ch/ml-simplefold
+bash scripts/resume_finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged.sh
 
 
 
