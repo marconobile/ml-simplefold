@@ -1,27 +1,45 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run cluster-conditioned SimpleFold evaluation multiple times for each NPZ type.
+# Run the same workflow as run_conditioned_eval_samples.sh, evaluating the
+# conditioning-vs-oracle comparison only on this VMD selection by default:
 #
-# Defaults:
-#   N=5
-#   STRUCTURE_TYPES=(active inactive pas)
-#   output root=/storage_common/nobilm/backmapping_pots_model/results
+#   name CA and resid 2 to 30 35 to 65 69 to 104 113 to 138 169 to 209 215 to 255 261 to 287 288 to 300
 #
-# Example:
-#   bash scripts/run_conditioned_eval_samples.sh
-#
-# Optional overrides:
-#   N=10 DEVICE=cuda:0 BASE_SEED=1234 bash scripts/run_conditioned_eval_samples.sh
+# Pass --all-res to evaluate every residue instead.
 
-# active: /home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/active_without_hs.npz
-# inactive: /home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/inactive_without_hs.npz
-# pas: /home/nobilm@usi.ch/ml-simplefold/test_new_data_with_clusters/pas_without_hs.npz
+ALL_RES=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --all-res)
+            ALL_RES=true
+            shift
+            ;;
+        -h|--help)
+            cat <<'EOF'
+Usage: bash scripts/run_conditioned_eval_samples_vmd_selection.sh [--all-res]
+
+By default, conditioning-vs-oracle evaluation is restricted exactly to:
+  name CA and resid 2 to 30 35 to 65 69 to 104 113 to 138 169 to 209 215 to 255 261 to 287 288 to 300
+
+Options:
+  --all-res  Apply conditioning-vs-oracle evaluation to all residues.
+  -h, --help Show this help message.
+EOF
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            echo "Use --help for usage." >&2
+            exit 2
+            ;;
+    esac
+done
 
 # check for changes
 DEVICE="${DEVICE:-cuda:0}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/checkpoints/last.ckpt}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue/samples_cfg3_aip}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue/samples_cfg2_tau_0.1_aip_selection}"
 
 # fixed
 N="${N:-10}"
@@ -44,7 +62,6 @@ RAW_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO
 
 
 
-
 #! for comparing against reference
 LABELS_NPZ_PATH="${LABELS_NPZ_PATH:-}" # none if comparing against reference
 echo "LABELS_NPZ_PATH=${LABELS_NPZ_PATH}"
@@ -55,17 +72,22 @@ echo "LABELS_NPZ_PATH=${LABELS_NPZ_PATH}"
 # TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/denovo_samples"
 
 
+comparison_scope_args=()
+if [[ "${ALL_RES}" == true ]]; then
+    comparison_scope_args+=(--all-res)
+fi
+
 cd "${REPO_ROOT}"
 for TYPE in "${STRUCTURE_TYPES[@]}"; do
     # RAW_NPZ_PATH="${RAW_NPZ_DIR}/${TYPE}_without_hs.npz"
-    echo "Processing TYPE=${TYPE} with raw NPZ: ${RAW_NPZ_PATH}"    
-        
+    echo "Processing TYPE=${TYPE} with raw NPZ: ${RAW_NPZ_PATH}"
+
     TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/${TYPE}_samples" #! here for active inactive pas splitting
     mkdir -p "${TYPE_OUTPUT_DIR}"
 
     echo "Running TYPE=${TYPE} N=${N} BASE_SEED=${BASE_SEED}"
     echo "Output: ${TYPE_OUTPUT_DIR}"
-    
+
     # LABELS_NPZ_PATH: optional. If set, Python samples N label rows.
     # Otherwise, Python samples N random observations from RAW_NPZ_PATH.
     cmd=(
@@ -76,8 +98,8 @@ for TYPE in "${STRUCTURE_TYPES[@]}"; do
         --raw-npz-path "${RAW_NPZ_PATH}"
         --output-dir "${TYPE_OUTPUT_DIR}"
         --device "${DEVICE}"
-        --guidance-scale 3.0
-        # --tau 0.8
+        --guidance-scale 2.0
+        --tau 0.1
     )
     if [[ -n "${LABELS_NPZ_PATH}" ]]; then
         cmd+=(
@@ -93,7 +115,7 @@ for TYPE in "${STRUCTURE_TYPES[@]}"; do
     python scripts/compare_conditioning_to_oracle.py \
         --base-path "${TYPE_OUTPUT_DIR}" \
         --out-dir "${TYPE_OUTPUT_DIR}" \
-        --all-res
+        "${comparison_scope_args[@]}"
 
     echo "Plotting assigned-cluster evaluation for TYPE=${TYPE}"
     python plot_evaluation.py --base_path "${TYPE_OUTPUT_DIR}" --out_dir "${TYPE_OUTPUT_DIR}"
@@ -103,7 +125,7 @@ echo "Comparing original conditioning vs oracle labels across all structure type
 python scripts/compare_conditioning_to_oracle.py \
     --base-path "${OUTPUT_ROOT}" \
     --out-dir "${OUTPUT_ROOT}" \
-    --all-res
+    "${comparison_scope_args[@]}"
 
 # echo "Plotting assigned-cluster evaluation across all structure types"
 # python plot_evaluation.py --base_path "${OUTPUT_ROOT}" --out_dir "${OUTPUT_ROOT}"

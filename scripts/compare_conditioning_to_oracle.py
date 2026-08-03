@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,26 @@ CONDITIONED_EVAL_TOKEN = "_conditioned_eval.npz"
 CONDITIONED_EVAL_JSON_TOKEN = "_conditioned_eval.json"
 CLUSTER_KEY = "atom_idx_and_glob_cluster_id_per_frame"
 SOURCE_SUFFIX = "_samples"
+VMD_SELECTION = (
+    "name CA and resid 2 to 30 35 to 65 69 to 104 113 to 138 "
+    "169 to 209 215 to 255 261 to 287 288 to 300"
+)
+VMD_RESID_RANGES = (
+    (2, 30),
+    (35, 65),
+    (69, 104),
+    (113, 138),
+    (169, 209),
+    (215, 255),
+    (261, 287),
+    (288, 300),
+)
+VMD_RESIDS = tuple(
+    resid
+    for first_resid, last_resid in VMD_RESID_RANGES
+    for resid in range(first_resid, last_resid + 1)
+)
+RESIDUE_KEY_PATTERN = re.compile(r"^res_(-?\d+)$")
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,6 +72,16 @@ def parse_args() -> argparse.Namespace:
         "--output-prefix",
         default="conditioning_vs_oracle",
         help="Prefix for CSV, TXT, and PNG outputs.",
+    )
+    parser.add_argument(
+        "--all-res",
+        "--all_res",
+        dest="all_res",
+        action="store_true",
+        help=(
+            "Evaluate all residues. By default, evaluate only residues in the "
+            f"VMD selection: {VMD_SELECTION!r}."
+        ),
     )
     return parser.parse_args()
 
@@ -183,6 +214,160 @@ def load_atom_resids(conditioned_eval_path: Path, metrics: dict[str, Any]) -> np
     )
 
 
+def metadata_npz_paths(
+    conditioned_eval_path: Path,
+    metrics: dict[str, Any],
+) -> list[Path]:
+    paths = [conditioned_eval_path] if conditioned_eval_path.is_file() else []
+    raw_npz = metrics.get("raw_npz_path")
+    if raw_npz:
+        raw_npz_path = Path(raw_npz).expanduser()
+        if raw_npz_path.is_file() and raw_npz_path != conditioned_eval_path:
+            paths.append(raw_npz_path)
+    return paths
+
+
+def load_optional_metadata_array(
+    conditioned_eval_path: Path,
+    metrics: dict[str, Any],
+    key: str,
+) -> tuple[np.ndarray | None, Path | None]:
+    for candidate in metadata_npz_paths(conditioned_eval_path, metrics):
+        value = optional_npz_array(candidate, key)
+        if value is not None:
+            return value, candidate
+    return None, None
+
+
+def text_value(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def load_vmd_resids_by_residue_index(
+    conditioned_eval_path: Path,
+    metrics: dict[str, Any],
+    n_residues: int,
+) -> np.ndarray:
+    residue_keys, source_path = load_optional_metadata_array(
+        conditioned_eval_path,
+        metrics,
+        "residue_keys",
+    )
+    if residue_keys is None or source_path is None:
+        raise KeyError(
+            "The strict VMD-residue evaluation requires 'residue_keys' in the "
+            f"conditioned NPZ or metrics['raw_npz_path'] for {conditioned_eval_path}. "
+            "Use --all-res only if evaluating every residue is intended."
+        )
+
+    residue_keys = one_dimensional(residue_keys, "residue_keys", source_path)
+    if residue_keys.shape[0] != n_residues:
+        raise ValueError(
+            f"residue_keys for {source_path} has {residue_keys.shape[0]} entries, "
+            f"but the cluster arrays have {n_residues} residues."
+        )
+
+    vmd_resids = []
+    for residue_index, raw_key in enumerate(residue_keys):
+        key = text_value(raw_key)
+        match = RESIDUE_KEY_PATTERN.fullmatch(key)
+        if match is None:
+            raise ValueError(
+                f"Invalid residue key {key!r} at residue index {residue_index} in "
+                f"{source_path}; strict VMD selection requires keys of the form "
+                "'res_<integer>'."
+            )
+        vmd_resids.append(int(match.group(1)))
+
+    result = np.asarray(vmd_resids, dtype=np.int64)
+    unique, counts = np.unique(result, return_counts=True)
+    duplicates = unique[counts != 1]
+    if duplicates.size:
+        raise ValueError(
+            f"Duplicate VMD residue IDs in {source_path}: {duplicates.tolist()}."
+        )
+    return result
+
+
+def validate_selected_ca_atoms(
+    conditioned_eval_path: Path,
+    metrics: dict[str, Any],
+    atom_resids: np.ndarray,
+    vmd_resids_by_index: np.ndarray,
+    selection_mask: np.ndarray,
+) -> None:
+    atom_names, source_path = load_optional_metadata_array(
+        conditioned_eval_path,
+        metrics,
+        "atom_names",
+    )
+    if atom_names is None or source_path is None:
+        raise KeyError(
+            "The strict VMD selection includes 'name CA', but 'atom_names' was not "
+            f"found for {conditioned_eval_path}. Use --all-res only if evaluating "
+            "every residue is intended."
+        )
+    atom_names = one_dimensional(atom_names, "atom_names", source_path)
+    if atom_names.shape != atom_resids.shape:
+        raise ValueError(
+            f"atom_names/atom_resids shape mismatch for {source_path}: "
+            f"{atom_names.shape} vs {atom_resids.shape}."
+        )
+
+    normalized_names = np.asarray(
+        [text_value(name).strip().upper() for name in atom_names],
+        dtype=str,
+    )
+    missing_ca_resids = []
+    for residue_index in np.flatnonzero(selection_mask):
+        has_ca = np.any((atom_resids == residue_index) & (normalized_names == "CA"))
+        if not has_ca:
+            missing_ca_resids.append(int(vmd_resids_by_index[residue_index]))
+    if missing_ca_resids:
+        raise ValueError(
+            f"The requested VMD residues without a CA atom in {source_path} are: "
+            f"{missing_ca_resids}."
+        )
+
+
+def strict_vmd_selection_mask(
+    conditioned_eval_path: Path,
+    metrics: dict[str, Any],
+    atom_resids: np.ndarray,
+    n_residues: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    vmd_resids_by_index = load_vmd_resids_by_residue_index(
+        conditioned_eval_path,
+        metrics,
+        n_residues,
+    )
+    selection_mask = np.isin(vmd_resids_by_index, VMD_RESIDS)
+    selected_resids = set(vmd_resids_by_index[selection_mask].tolist())
+    requested_resids = set(VMD_RESIDS)
+    if selected_resids != requested_resids:
+        missing = sorted(requested_resids - selected_resids)
+        unexpected = sorted(selected_resids - requested_resids)
+        raise ValueError(
+            "Residue metadata does not exactly satisfy the requested VMD selection "
+            f"for {conditioned_eval_path}. Missing={missing}; unexpected={unexpected}."
+        )
+    if int(selection_mask.sum()) != len(VMD_RESIDS):
+        raise ValueError(
+            f"Expected exactly {len(VMD_RESIDS)} selected residues for "
+            f"{conditioned_eval_path}, got {int(selection_mask.sum())}."
+        )
+    validate_selected_ca_atoms(
+        conditioned_eval_path,
+        metrics,
+        atom_resids,
+        vmd_resids_by_index,
+        selection_mask,
+    )
+    return selection_mask, vmd_resids_by_index
+
+
 def labels_to_residue_global(
     atom_global_labels: np.ndarray,
     atom_resids: np.ndarray,
@@ -247,7 +432,12 @@ def global_to_local_labels(
     return local.astype(np.int64, copy=False)
 
 
-def compare_labels(expected: np.ndarray, oracle: np.ndarray, path: Path) -> dict[str, Any]:
+def compare_labels(
+    expected: np.ndarray,
+    oracle: np.ndarray,
+    path: Path,
+    selection_mask: np.ndarray | None = None,
+) -> dict[str, Any]:
     expected = one_dimensional(expected, "expected labels", path).astype(np.int64, copy=False)
     oracle = one_dimensional(oracle, "oracle labels", path).astype(np.int64, copy=False)
     if expected.shape != oracle.shape:
@@ -255,7 +445,21 @@ def compare_labels(expected: np.ndarray, oracle: np.ndarray, path: Path) -> dict
             f"Expected/oracle label shape mismatch for {path}: "
             f"{expected.shape} vs {oracle.shape}."
         )
-    valid = (expected >= 0) & (oracle >= 0)
+    if selection_mask is None:
+        selection_mask = np.ones(expected.shape, dtype=bool)
+    else:
+        selection_mask = one_dimensional(
+            selection_mask,
+            "residue selection mask",
+            path,
+        ).astype(bool, copy=False)
+        if selection_mask.shape != expected.shape:
+            raise ValueError(
+                f"Residue selection mask shape mismatch for {path}: "
+                f"{selection_mask.shape} vs {expected.shape}."
+            )
+
+    valid = (expected >= 0) & (oracle >= 0) & selection_mask
     if not np.any(valid):
         raise ValueError(f"No comparable residue labels for {path}.")
     diff = oracle - expected
@@ -265,6 +469,7 @@ def compare_labels(expected: np.ndarray, oracle: np.ndarray, path: Path) -> dict
     mismatch_count = int(mismatches.sum())
     return {
         "n_residues": int(expected.shape[0]),
+        "n_selected_residues": int(selection_mask.sum()),
         "n_compared": n_compared,
         "match_count": int(n_compared - mismatch_count),
         "mismatch_count": mismatch_count,
@@ -292,8 +497,12 @@ def write_per_sample_report(path: Path, row: dict[str, Any]) -> None:
         f"  sample_index: {row.get('sample_index')}",
         f"  seed: {row.get('seed')}",
         "",
+        "Evaluation scope",
+        f"  selection: {row['selection']}",
+        f"  selected_residues: {row['n_selected_residues']}",
+        "",
         "Metrics",
-        f"  residues: {row['n_residues']}",
+        f"  total_residues: {row['n_residues']}",
         f"  compared: {row['n_compared']}",
         f"  matches: {row['match_count']}",
         f"  mismatches: {row['mismatch_count']}",
@@ -334,8 +543,12 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 def write_summary_report(path: Path, rows: list[dict[str, Any]], summary: dict[str, dict[str, Any]]) -> None:
+    selections = sorted({str(row["selection"]) for row in rows})
     lines = [
         "Conditioning vs oracle aggregate report",
+        "",
+        "Evaluation scope",
+        *[f"  {selection}" for selection in selections],
         "",
         "Groups",
     ]
@@ -385,7 +598,9 @@ def write_sample_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "frame_index",
         "sample_index",
         "seed",
+        "selection",
         "n_residues",
+        "n_selected_residues",
         "n_compared",
         "match_count",
         "mismatch_count",
@@ -406,6 +621,7 @@ def write_residue_csv(path: Path, residue_rows: list[dict[str, Any]]) -> None:
         "source_type",
         "sample_name",
         "residue_index",
+        "vmd_resid",
         "expected_local_label",
         "oracle_label",
         "match",
@@ -466,7 +682,11 @@ def plot_summary(path: Path, rows: list[dict[str, Any]]) -> None:
     plt.close(fig)
 
 
-def compare_file(assigned_path: Path, base_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def compare_file(
+    assigned_path: Path,
+    base_path: Path,
+    all_res: bool = False,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     conditioned_eval_path = conditioned_eval_path_for_assigned(assigned_path)
     metrics_path = conditioned_eval_json_path_for_assigned(assigned_path)
     metrics = load_metrics(metrics_path)
@@ -485,7 +705,24 @@ def compare_file(assigned_path: Path, base_path: Path) -> tuple[dict[str, Any], 
 
     residue_global = labels_to_residue_global(atom_conditioning, atom_resids, conditioned_eval_path)
     expected_local = global_to_local_labels(residue_global, cluster_counts, assigned_path)
-    comparison = compare_labels(expected_local, oracle_labels, assigned_path)
+    if all_res:
+        selection_mask = np.ones(expected_local.shape, dtype=bool)
+        vmd_resids_by_index = None
+        selection = "all residues"
+    else:
+        selection_mask, vmd_resids_by_index = strict_vmd_selection_mask(
+            conditioned_eval_path,
+            metrics,
+            atom_resids,
+            expected_local.shape[0],
+        )
+        selection = VMD_SELECTION
+    comparison = compare_labels(
+        expected_local,
+        oracle_labels,
+        assigned_path,
+        selection_mask=selection_mask,
+    )
 
     sample_name = sample_name_for_assigned(assigned_path)
     source_type = source_type_for_path(assigned_path, base_path)
@@ -498,7 +735,9 @@ def compare_file(assigned_path: Path, base_path: Path) -> tuple[dict[str, Any], 
         "frame_index": metrics.get("frame_index"),
         "sample_index": metrics.get("sample_index"),
         "seed": metrics.get("seed"),
+        "selection": selection,
         "n_residues": comparison["n_residues"],
+        "n_selected_residues": comparison["n_selected_residues"],
         "n_compared": comparison["n_compared"],
         "match_count": comparison["match_count"],
         "mismatch_count": comparison["mismatch_count"],
@@ -520,6 +759,11 @@ def compare_file(assigned_path: Path, base_path: Path) -> tuple[dict[str, Any], 
                 "source_type": source_type,
                 "sample_name": sample_name,
                 "residue_index": residue_idx,
+                "vmd_resid": (
+                    int(vmd_resids_by_index[residue_idx])
+                    if vmd_resids_by_index is not None
+                    else None
+                ),
                 "expected_local_label": int(expected_local[residue_idx]),
                 "oracle_label": int(oracle_labels[residue_idx]),
                 "match": int(not bool(mismatches[residue_idx])),
@@ -551,7 +795,7 @@ def main() -> None:
     rows = []
     residue_rows = []
     for assigned_path in assigned_files:
-        row, per_residue = compare_file(assigned_path, base_path)
+        row, per_residue = compare_file(assigned_path, base_path, all_res=args.all_res)
         rows.append(row)
         residue_rows.extend(per_residue)
 
@@ -573,7 +817,8 @@ def main() -> None:
     write_summary_report(report_path, rows, summary)
     plot_summary(plot_path, rows)
 
-    print(f"Processed {len(rows)} assigned cluster file(s).")
+    scope = "all residues" if args.all_res else VMD_SELECTION
+    print(f"Processed {len(rows)} assigned cluster file(s) using: {scope}")
     print(f"Wrote per-structure CSV: {sample_csv}")
     print(f"Wrote per-residue CSV: {residue_csv}")
     print(f"Wrote report: {report_path}")

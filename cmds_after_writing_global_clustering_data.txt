@@ -52,7 +52,7 @@ CUDA_VISIBLE_DEVICES=0 \
 /home/nobilm@usi.ch/miniconda3/envs/simplefold/bin/python src/simplefold/train.py \
   experiment=train \
   hydra.job.name=finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged \
-  paths.output_dir=/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged_v0 \
+  paths.output_dir=/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged \
   paths.tmp_dir=/tmp/tmp \
   +load_ckpt_path=/home/nobilm@usi.ch/ml-simplefold/artifacts/simplefold_100M.ckpt \
   trainer.accelerator=gpu \
