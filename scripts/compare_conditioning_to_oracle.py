@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare sampling conditioning labels to oracle-assigned sampled labels."""
+"""Compare conditioning labels and selection-fitted sampled-vs-target PDB RMSDs."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -43,13 +44,82 @@ VMD_RESIDS = tuple(
     for resid in range(first_resid, last_resid + 1)
 )
 RESIDUE_KEY_PATTERN = re.compile(r"^res_(-?\d+)$")
+PDB_ATOM_RECORDS = ("ATOM  ", "HETATM")
+BACKBONE_ATOM_NAMES = frozenset(("N", "CA", "C", "O"))
+RMSD_SELECTIONS = (
+    (
+        "vmd_ca_residues",
+        VMD_SELECTION,
+    ),
+    (
+        "ca",
+        "name CA",
+    ),
+    (
+        "backbone",
+        "protein backbone atoms (name N CA C O)",
+    ),
+    (
+        "protein_not_backbone",
+        "protein and not backbone",
+    ),
+    (
+        "all_atoms",
+        "all ATOM/HETATM records",
+    ),
+)
+RMSD_SELECTION_KEYS = tuple(key for key, _ in RMSD_SELECTIONS)
+RMSD_SELECTION_DEFINITIONS = dict(RMSD_SELECTIONS)
+RMSD_SELECTION_PLOT_TITLES = {
+    "vmd_ca_residues": "Strict VMD CA/resid selection",
+    "ca": "All CA atoms",
+    "backbone": "Protein backbone (N, CA, C, O)",
+    "protein_not_backbone": "Protein and not backbone",
+    "all_atoms": "All atoms",
+}
+
+
+@dataclass(frozen=True)
+class PdbAtom:
+    record_name: str
+    atom_name: str
+    alternate_location: str
+    residue_name: str
+    chain_id: str
+    residue_number: int
+    insertion_code: str
+    coords: tuple[float, float, float]
+    line_number: int
+
+    @property
+    def atom_identity(self) -> tuple[str, str, str, str, str, int, str]:
+        return (
+            self.record_name,
+            self.atom_name,
+            self.alternate_location,
+            self.residue_name,
+            self.chain_id,
+            self.residue_number,
+            self.insertion_code,
+        )
+
+    @property
+    def residue_identity(self) -> tuple[str, int, str, str]:
+        return (
+            self.chain_id,
+            self.residue_number,
+            self.insertion_code,
+            self.residue_name,
+        )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Compare the conditioning vector saved by sample_with_conditioning.py "
-            "against oracle labels written by assign_conditioned_eval_sample_clusters.py."
+            "against oracle labels written by assign_conditioned_eval_sample_clusters.py, "
+            "and calculate strictly paired sampled-PDB-vs-target-PDB RMSDs for five "
+            "atom selections."
         )
     )
     parser.add_argument(
@@ -79,8 +149,9 @@ def parse_args() -> argparse.Namespace:
         dest="all_res",
         action="store_true",
         help=(
-            "Evaluate all residues. By default, evaluate only residues in the "
-            f"VMD selection: {VMD_SELECTION!r}."
+            "Use all residues for the primary cluster-label comparison. By "
+            f"default, use the VMD selection {VMD_SELECTION!r}. All five PDB "
+            "RMSD atom selections are always evaluated."
         ),
     )
     return parser.parse_args()
@@ -368,6 +439,434 @@ def strict_vmd_selection_mask(
     return selection_mask, vmd_resids_by_index
 
 
+def resolve_recorded_path(raw_path: Any, metrics_path: Path, field_name: str) -> Path:
+    if not raw_path:
+        raise KeyError(f"{metrics_path} is missing required field {field_name!r}.")
+    path = Path(str(raw_path)).expanduser()
+    if not path.is_absolute():
+        path = metrics_path.parent / path
+    return path.resolve()
+
+
+def expected_rmsd_pdb_paths(conditioned_eval_path: Path) -> tuple[Path, Path, Path]:
+    if not conditioned_eval_path.name.endswith(CONDITIONED_EVAL_TOKEN):
+        raise ValueError(f"Unexpected conditioned-evaluation filename: {conditioned_eval_path}")
+    sampled_pdb = conditioned_eval_path.with_name(
+        conditioned_eval_path.name.replace(
+            CONDITIONED_EVAL_TOKEN,
+            "_conditioned_eval_sampled.pdb",
+            1,
+        )
+    )
+    target_cif = conditioned_eval_path.with_name(
+        conditioned_eval_path.name.replace(
+            CONDITIONED_EVAL_TOKEN,
+            "_conditioned_eval_target_reference.cif",
+            1,
+        )
+    )
+    return sampled_pdb, target_cif, target_cif.with_suffix(".pdb")
+
+
+def strict_rmsd_pdb_paths(
+    conditioned_eval_path: Path,
+    metrics_path: Path,
+    metrics: dict[str, Any],
+) -> tuple[Path, Path]:
+    expected_sampled_pdb, expected_target_cif, expected_target_pdb = (
+        expected_rmsd_pdb_paths(conditioned_eval_path)
+    )
+    recorded_sampled_pdb = resolve_recorded_path(
+        metrics.get("sampled_pdb_path"),
+        metrics_path,
+        "sampled_pdb_path",
+    )
+    recorded_target_cif = resolve_recorded_path(
+        metrics.get("target_reference_cif_path"),
+        metrics_path,
+        "target_reference_cif_path",
+    )
+
+    expected_sampled_pdb = expected_sampled_pdb.resolve()
+    expected_target_cif = expected_target_cif.resolve()
+    expected_target_pdb = expected_target_pdb.resolve()
+    if recorded_sampled_pdb != expected_sampled_pdb:
+        raise ValueError(
+            "Refusing RMSD evaluation because metrics['sampled_pdb_path'] does not "
+            f"match the conditioned-evaluation sample. Recorded={recorded_sampled_pdb}; "
+            f"expected={expected_sampled_pdb}."
+        )
+    if recorded_target_cif != expected_target_cif:
+        raise ValueError(
+            "Refusing RMSD evaluation because metrics['target_reference_cif_path'] "
+            "does not match the conditioned-evaluation sample. "
+            f"Recorded={recorded_target_cif}; expected={expected_target_cif}."
+        )
+    if recorded_sampled_pdb == expected_target_pdb:
+        raise ValueError(
+            f"Sampled and target PDB paths unexpectedly resolve to the same file: "
+            f"{recorded_sampled_pdb}."
+        )
+    if not recorded_sampled_pdb.is_file():
+        raise FileNotFoundError(f"Sampled PDB not found: {recorded_sampled_pdb}")
+    if not expected_target_pdb.is_file():
+        raise FileNotFoundError(
+            "Target PDB not found beside the recorded target-reference CIF: "
+            f"{expected_target_pdb}"
+        )
+    return recorded_sampled_pdb, expected_target_pdb
+
+
+def read_pdb_atoms(path: Path) -> list[PdbAtom]:
+    atoms = []
+    with path.open() as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.startswith(PDB_ATOM_RECORDS):
+                continue
+            if len(line) < 54:
+                raise ValueError(
+                    f"Malformed ATOM/HETATM record at {path}:{line_number}; "
+                    "the coordinate columns are missing."
+                )
+            try:
+                residue_number = int(line[22:26])
+                coords = (
+                    float(line[30:38]),
+                    float(line[38:46]),
+                    float(line[46:54]),
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    f"Malformed residue number or coordinates at {path}:{line_number}."
+                ) from exc
+            if not np.isfinite(coords).all():
+                raise ValueError(f"Non-finite coordinates at {path}:{line_number}.")
+            atoms.append(
+                PdbAtom(
+                    record_name=line[0:6].strip(),
+                    atom_name=line[12:16].strip().upper(),
+                    alternate_location=line[16].strip(),
+                    residue_name=line[17:20].strip().upper(),
+                    chain_id=line[21].strip(),
+                    residue_number=residue_number,
+                    insertion_code=line[26].strip(),
+                    coords=coords,
+                    line_number=line_number,
+                )
+            )
+
+    if not atoms:
+        raise ValueError(f"No ATOM/HETATM records found in {path}.")
+    identities = [atom.atom_identity for atom in atoms]
+    if len(set(identities)) != len(identities):
+        seen = set()
+        duplicate = None
+        for identity in identities:
+            if identity in seen:
+                duplicate = identity
+                break
+            seen.add(identity)
+        raise ValueError(f"Duplicate atom identity in {path}: {duplicate}.")
+    return atoms
+
+
+def pdb_residue_ordinals(atoms: list[PdbAtom], path: Path) -> np.ndarray:
+    ordinal_by_identity: dict[tuple[str, int, str, str], int] = {}
+    completed_residues: set[tuple[str, int, str, str]] = set()
+    ordinals = []
+    previous_identity = None
+    for atom in atoms:
+        identity = atom.residue_identity
+        if identity != previous_identity:
+            if identity in completed_residues:
+                raise ValueError(
+                    f"Residue {identity} is non-contiguous in {path}; atom order is "
+                    "not safe for NPZ-to-PDB validation."
+                )
+            if previous_identity is not None:
+                completed_residues.add(previous_identity)
+            ordinal_by_identity.setdefault(identity, len(ordinal_by_identity))
+            previous_identity = identity
+        ordinals.append(ordinal_by_identity[identity])
+    return np.asarray(ordinals, dtype=np.int64)
+
+
+def validate_pdb_coordinates_against_npz(
+    pdb_coords: np.ndarray,
+    npz_coords: np.ndarray,
+    pdb_path: Path,
+    conditioned_eval_path: Path,
+    npz_key: str,
+    atol: float = 1e-2,
+) -> str:
+    npz_coords = np.asarray(npz_coords, dtype=np.float64)
+    if pdb_coords.shape != npz_coords.shape:
+        raise ValueError(
+            f"Refusing RMSD evaluation because {pdb_path} has coordinate shape "
+            f"{pdb_coords.shape}, while {conditioned_eval_path}[{npz_key!r}] has "
+            f"shape {npz_coords.shape}."
+        )
+    direct_delta = np.abs(pdb_coords - npz_coords)
+    direct_max = float(np.max(direct_delta))
+    if direct_max <= atol:
+        return "direct"
+
+    inverted_delta = np.abs(pdb_coords + npz_coords)
+    inverted_max = float(np.max(inverted_delta))
+    if inverted_max <= atol:
+        return "global_inversion"
+
+    direct_rmsd = float(np.sqrt(np.mean(np.sum(direct_delta**2, axis=1))))
+    inverted_rmsd = float(np.sqrt(np.mean(np.sum(inverted_delta**2, axis=1))))
+    raise ValueError(
+        "Refusing RMSD evaluation because the selected PDB does not reproduce its "
+        f"stored conditioned-evaluation coordinates: pdb={pdb_path}; "
+        f"npz={conditioned_eval_path}; key={npz_key!r}; "
+        f"direct_max_abs_delta={direct_max:.6f}; direct_rmsd={direct_rmsd:.6f}; "
+        f"inverted_max_abs_delta={inverted_max:.6f}; "
+        f"inverted_rmsd={inverted_rmsd:.6f}."
+    )
+
+
+def validate_pdb_pair_and_metadata(
+    sampled_pdb_path: Path,
+    target_pdb_path: Path,
+    conditioned_eval_path: Path,
+    metrics: dict[str, Any],
+    atom_resids: np.ndarray,
+    n_residues: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, str]:
+    sampled_atoms = read_pdb_atoms(sampled_pdb_path)
+    target_atoms = read_pdb_atoms(target_pdb_path)
+    sampled_identities = [atom.atom_identity for atom in sampled_atoms]
+    target_identities = [atom.atom_identity for atom in target_atoms]
+    if sampled_identities != target_identities:
+        first_mismatch = next(
+            (
+                idx
+                for idx, pair in enumerate(
+                    zip(sampled_identities, target_identities, strict=False)
+                )
+                if pair[0] != pair[1]
+            ),
+            min(len(sampled_identities), len(target_identities)),
+        )
+        raise ValueError(
+            "Refusing RMSD evaluation because sampled/target PDB atom identities "
+            f"do not match exactly. sampled={sampled_pdb_path}; target={target_pdb_path}; "
+            f"sampled_atoms={len(sampled_atoms)}; target_atoms={len(target_atoms)}; "
+            f"first_mismatch_index={first_mismatch}."
+        )
+
+    atom_names, atom_names_path = load_optional_metadata_array(
+        conditioned_eval_path,
+        metrics,
+        "atom_names",
+    )
+    if atom_names is None or atom_names_path is None:
+        raise KeyError(
+            f"Cannot validate PDB atom identities for {conditioned_eval_path}: "
+            "'atom_names' is unavailable."
+        )
+    atom_names = one_dimensional(atom_names, "atom_names", atom_names_path)
+    normalized_atom_names = np.asarray(
+        [text_value(name).strip().upper() for name in atom_names],
+        dtype=str,
+    )
+    if normalized_atom_names.shape != atom_resids.shape:
+        raise ValueError(
+            f"NPZ atom_names/atom_resids shape mismatch: {normalized_atom_names.shape} "
+            f"vs {atom_resids.shape}."
+        )
+    if len(target_atoms) != atom_resids.shape[0]:
+        raise ValueError(
+            "Refusing RMSD evaluation because PDB and NPZ atom counts differ: "
+            f"PDB={len(target_atoms)}, NPZ={atom_resids.shape[0]}."
+        )
+
+    pdb_atom_names = np.asarray([atom.atom_name for atom in target_atoms], dtype=str)
+    if not np.array_equal(pdb_atom_names, normalized_atom_names):
+        mismatch = np.flatnonzero(pdb_atom_names != normalized_atom_names)[:20].tolist()
+        raise ValueError(
+            "Refusing RMSD evaluation because target PDB atom names do not match "
+            f"the raw NPZ atom order at indices {mismatch}."
+        )
+    target_residue_ordinals = pdb_residue_ordinals(target_atoms, target_pdb_path)
+    sampled_residue_ordinals = pdb_residue_ordinals(sampled_atoms, sampled_pdb_path)
+    if not np.array_equal(sampled_residue_ordinals, target_residue_ordinals):
+        raise ValueError("Sampled and target PDB residue ordering differs.")
+    if not np.array_equal(target_residue_ordinals, atom_resids):
+        mismatch = np.flatnonzero(target_residue_ordinals != atom_resids)[:20].tolist()
+        raise ValueError(
+            "Refusing RMSD evaluation because target PDB residue order does not "
+            f"match atom_resids at atom indices {mismatch}."
+        )
+    observed_residues = np.unique(target_residue_ordinals)
+    if not np.array_equal(observed_residues, np.arange(n_residues, dtype=np.int64)):
+        raise ValueError(
+            f"PDB residues do not cover exactly 0..{n_residues - 1} by ordinal: "
+            f"{target_pdb_path}."
+        )
+
+    sampled_coords = np.asarray([atom.coords for atom in sampled_atoms], dtype=np.float64)
+    target_coords = np.asarray([atom.coords for atom in target_atoms], dtype=np.float64)
+    sampled_npz_coords = load_npz_array(conditioned_eval_path, "aligned_sampled_coords")
+    target_npz_coords = load_npz_array(conditioned_eval_path, "original_coords")
+    sampled_coordinate_relation = validate_pdb_coordinates_against_npz(
+        sampled_coords,
+        sampled_npz_coords,
+        sampled_pdb_path,
+        conditioned_eval_path,
+        "aligned_sampled_coords",
+    )
+    target_coordinate_relation = validate_pdb_coordinates_against_npz(
+        target_coords,
+        target_npz_coords,
+        target_pdb_path,
+        conditioned_eval_path,
+        "original_coords",
+    )
+    return (
+        sampled_coords,
+        target_coords,
+        pdb_atom_names,
+        sampled_coordinate_relation,
+        target_coordinate_relation,
+    )
+
+
+def selection_fitted_rmsd(
+    sampled_coords: np.ndarray,
+    target_coords: np.ndarray,
+    atom_mask: np.ndarray,
+    selection_name: str,
+) -> float:
+    atom_mask = np.asarray(atom_mask, dtype=bool)
+    if sampled_coords.shape != target_coords.shape:
+        raise ValueError(
+            f"Sampled/target coordinate shape mismatch: {sampled_coords.shape} vs "
+            f"{target_coords.shape}."
+        )
+    if atom_mask.shape != (sampled_coords.shape[0],):
+        raise ValueError(
+            f"Atom mask for selection {selection_name!r} has shape {atom_mask.shape}; "
+            f"expected {(sampled_coords.shape[0],)}."
+        )
+    if int(atom_mask.sum()) < 3:
+        raise ValueError(
+            f"Selection {selection_name!r} contains fewer than three atoms."
+        )
+
+    mobile = sampled_coords[atom_mask]
+    target = target_coords[atom_mask]
+    mobile_centered = mobile - mobile.mean(axis=0)
+    target_centered = target - target.mean(axis=0)
+    covariance = mobile_centered.T @ target_centered
+    u, _, vt = np.linalg.svd(covariance)
+    correction = np.eye(3)
+    correction[-1, -1] = np.sign(np.linalg.det(u @ vt))
+    rotation = u @ correction @ vt
+    aligned = mobile_centered @ rotation + target.mean(axis=0)
+    squared_distances = np.sum((aligned - target) ** 2, axis=1)
+    return float(np.sqrt(np.mean(squared_distances)))
+
+
+def evaluate_atom_selections(
+    *,
+    sampled_pdb_path: Path,
+    target_pdb_path: Path,
+    conditioned_eval_path: Path,
+    metrics: dict[str, Any],
+    atom_resids: np.ndarray,
+    vmd_resids_by_index: np.ndarray,
+    expected_local: np.ndarray,
+    oracle_labels: np.ndarray,
+    assigned_path: Path,
+) -> list[dict[str, Any]]:
+    (
+        sampled_coords,
+        target_coords,
+        atom_names,
+        sampled_coordinate_relation,
+        target_coordinate_relation,
+    ) = validate_pdb_pair_and_metadata(
+        sampled_pdb_path,
+        target_pdb_path,
+        conditioned_eval_path,
+        metrics,
+        atom_resids,
+        expected_local.shape[0],
+    )
+    ca_mask = atom_names == "CA"
+    ca_counts = np.bincount(
+        atom_resids[ca_mask],
+        minlength=expected_local.shape[0],
+    )
+    invalid_ca_residues = np.flatnonzero(ca_counts != 1)
+    if invalid_ca_residues.size:
+        raise ValueError(
+            "Strict CA selections require exactly one CA per residue; invalid "
+            f"residue indices: {invalid_ca_residues[:20].tolist()}."
+        )
+    vmd_resids_per_atom = vmd_resids_by_index[atom_resids]
+    backbone_mask = np.isin(atom_names, tuple(BACKBONE_ATOM_NAMES))
+    protein_residue_mask = np.zeros(expected_local.shape, dtype=bool)
+    for residue_index in range(expected_local.shape[0]):
+        residue_atom_names = set(atom_names[atom_resids == residue_index].tolist())
+        protein_residue_mask[residue_index] = BACKBONE_ATOM_NAMES.issubset(
+            residue_atom_names
+        )
+    protein_atom_mask = protein_residue_mask[atom_resids]
+    atom_masks = {
+        "vmd_ca_residues": ca_mask & np.isin(vmd_resids_per_atom, VMD_RESIDS),
+        "ca": ca_mask,
+        "backbone": backbone_mask,
+        "protein_not_backbone": protein_atom_mask & ~backbone_mask,
+        "all_atoms": np.ones(atom_names.shape, dtype=bool),
+    }
+
+    evaluations = []
+    for selection_name in RMSD_SELECTION_KEYS:
+        atom_mask = atom_masks[selection_name]
+        residue_mask = np.zeros(expected_local.shape, dtype=bool)
+        residue_mask[np.unique(atom_resids[atom_mask])] = True
+        comparison = compare_labels(
+            expected_local,
+            oracle_labels,
+            assigned_path,
+            selection_mask=residue_mask,
+        )
+        evaluations.append(
+            {
+                "selection_name": selection_name,
+                "selection_definition": RMSD_SELECTION_DEFINITIONS[selection_name],
+                "selected_atom_count": int(atom_mask.sum()),
+                "selected_residue_count": int(residue_mask.sum()),
+                "sampled_pdb_npz_relation": sampled_coordinate_relation,
+                "target_pdb_npz_relation": target_coordinate_relation,
+                "pdb_rmsd_angstrom": selection_fitted_rmsd(
+                    sampled_coords,
+                    target_coords,
+                    atom_mask,
+                    selection_name,
+                ),
+                "n_compared": comparison["n_compared"],
+                "match_count": comparison["match_count"],
+                "mismatch_count": comparison["mismatch_count"],
+                "accuracy": comparison["accuracy"],
+                "mismatch_fraction": comparison["mismatch_fraction"],
+            }
+        )
+
+    vmd_evaluation = evaluations[0]
+    if vmd_evaluation["selected_atom_count"] != len(VMD_RESIDS):
+        raise ValueError(
+            f"The strict VMD CA selection must contain {len(VMD_RESIDS)} atoms, "
+            f"got {vmd_evaluation['selected_atom_count']}."
+        )
+    return evaluations
+
+
 def labels_to_residue_global(
     atom_global_labels: np.ndarray,
     atom_resids: np.ndarray,
@@ -483,7 +982,11 @@ def compare_labels(
     }
 
 
-def write_per_sample_report(path: Path, row: dict[str, Any]) -> None:
+def write_per_sample_report(
+    path: Path,
+    row: dict[str, Any],
+    selection_rows: list[dict[str, Any]],
+) -> None:
     lines = [
         "Conditioning vs oracle comparison",
         "",
@@ -510,7 +1013,27 @@ def write_per_sample_report(path: Path, row: dict[str, Any]) -> None:
         f"  mismatch_fraction: {row['mismatch_fraction']:.6f}",
         f"  mean_abs_error: {row['mean_abs_error']:.6f}",
         f"  max_abs_error: {row['max_abs_error']}",
+        "",
+        "Sampled PDB vs target PDB selection-fitted RMSDs",
+        f"  sampled_pdb: {row['sampled_pdb']}",
+        f"  target_pdb: {row['target_pdb']}",
+        f"  sampled_pdb_npz_relation: {row['sampled_pdb_npz_relation']}",
+        f"  target_pdb_npz_relation: {row['target_pdb_npz_relation']}",
     ]
+    for selection_row in selection_rows:
+        lines.extend(
+            [
+                f"  {selection_row['selection_name']}",
+                f"    definition: {selection_row['selection_definition']}",
+                f"    atoms: {selection_row['selected_atom_count']}",
+                f"    residues: {selection_row['selected_residue_count']}",
+                f"    rmsd_angstrom: {selection_row['pdb_rmsd_angstrom']:.6f}",
+                (
+                    f"    cluster_matches: {selection_row['match_count']}/"
+                    f"{selection_row['n_compared']}"
+                ),
+            ]
+        )
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -542,7 +1065,12 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return summary
 
 
-def write_summary_report(path: Path, rows: list[dict[str, Any]], summary: dict[str, dict[str, Any]]) -> None:
+def write_summary_report(
+    path: Path,
+    rows: list[dict[str, Any]],
+    summary: dict[str, dict[str, Any]],
+    selection_rows: list[dict[str, Any]],
+) -> None:
     selections = sorted({str(row["selection"]) for row in rows})
     lines = [
         "Conditioning vs oracle aggregate report",
@@ -577,6 +1105,35 @@ def write_summary_report(path: Path, rows: list[dict[str, Any]], summary: dict[s
             ]
         )
 
+    lines.append("Sampled PDB vs Target PDB RMSD by Selection")
+    for selection_name in RMSD_SELECTION_KEYS:
+        group = [
+            row for row in selection_rows if row["selection_name"] == selection_name
+        ]
+        values = np.asarray(
+            [row["pdb_rmsd_angstrom"] for row in group],
+            dtype=np.float64,
+        )
+        n_compared = sum(int(row["n_compared"]) for row in group)
+        matches = sum(int(row["match_count"]) for row in group)
+        mismatches = sum(int(row["mismatch_count"]) for row in group)
+        lines.extend(
+            [
+                f"  {selection_name}",
+                f"    definition: {RMSD_SELECTION_DEFINITIONS[selection_name]}",
+                f"    sample_count: {values.size}",
+                f"    compared_residue_labels: {n_compared}",
+                f"    matching_residue_labels: {matches}",
+                f"    mismatching_residue_labels: {mismatches}",
+                f"    residue_label_accuracy: {matches / n_compared:.6f}",
+                f"    mean_angstrom: {float(np.mean(values)):.6f}",
+                f"    median_angstrom: {float(np.median(values)):.6f}",
+                f"    min_angstrom: {float(np.min(values)):.6f}",
+                f"    max_angstrom: {float(np.max(values)):.6f}",
+                "",
+            ]
+        )
+
     lines.append("Per Sample")
     for row in rows:
         lines.append(
@@ -599,6 +1156,10 @@ def write_sample_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "sample_index",
         "seed",
         "selection",
+        "sampled_pdb",
+        "target_pdb",
+        "sampled_pdb_npz_relation",
+        "target_pdb_npz_relation",
         "n_residues",
         "n_selected_residues",
         "n_compared",
@@ -608,6 +1169,39 @@ def write_sample_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "mismatch_fraction",
         "mean_abs_error",
         "max_abs_error",
+    ]
+    for selection_name in RMSD_SELECTION_KEYS:
+        columns.extend(
+            [
+                f"rmsd_{selection_name}_angstrom",
+                f"rmsd_{selection_name}_atom_count",
+            ]
+        )
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column) for column in columns})
+
+
+def write_selection_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    columns = [
+        "source_type",
+        "sample_name",
+        "sampled_pdb",
+        "target_pdb",
+        "selection_name",
+        "selection_definition",
+        "selected_atom_count",
+        "selected_residue_count",
+        "sampled_pdb_npz_relation",
+        "target_pdb_npz_relation",
+        "pdb_rmsd_angstrom",
+        "n_compared",
+        "match_count",
+        "mismatch_count",
+        "accuracy",
+        "mismatch_fraction",
     ]
     with path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
@@ -644,7 +1238,12 @@ def plot_summary(path: Path, rows: list[dict[str, Any]]) -> None:
         source_type: colors(idx % 10) for idx, source_type in enumerate(source_types)
     }
 
-    fig, axes = plt.subplots(2, 1, figsize=(max(10.0, 0.45 * len(rows)), 9.0), constrained_layout=True)
+    fig, axes = plt.subplots(
+        2,
+        1,
+        figsize=(max(10.0, 0.45 * len(rows)), 9.0),
+        constrained_layout=True,
+    )
     x = np.arange(len(rows))
     mismatch_counts = np.asarray([row["mismatch_count"] for row in rows], dtype=np.int64)
     mismatch_fracs = np.asarray([row["mismatch_fraction"] for row in rows], dtype=np.float64)
@@ -682,11 +1281,84 @@ def plot_summary(path: Path, rows: list[dict[str, Any]]) -> None:
     plt.close(fig)
 
 
+def plot_rmsd_histograms(path: Path, rows: list[dict[str, Any]]) -> None:
+    values_by_selection = {
+        selection_name: np.asarray(
+            [row[f"rmsd_{selection_name}_angstrom"] for row in rows],
+            dtype=np.float64,
+        )
+        for selection_name in RMSD_SELECTION_KEYS
+    }
+    if not np.isfinite(np.concatenate(list(values_by_selection.values()))).all():
+        raise ValueError("Cannot plot non-finite sampled-vs-target PDB RMSD values.")
+
+    bin_count = max(5, min(20, int(np.ceil(np.sqrt(len(rows))))))
+
+    n_columns = 2
+    n_rows = int(np.ceil(len(RMSD_SELECTION_KEYS) / n_columns))
+    fig, axes = plt.subplots(
+        n_rows,
+        n_columns,
+        figsize=(14.0, 3.8 * n_rows),
+        constrained_layout=True,
+    )
+    axes_flat = np.asarray(axes).reshape(-1)
+    selection_colors = plt.get_cmap("Dark2")
+    for selection_idx, selection_name in enumerate(RMSD_SELECTION_KEYS):
+        ax = axes_flat[selection_idx]
+        values = values_by_selection[selection_name]
+        mean = float(np.mean(values))
+        median = float(np.median(values))
+        value_min = float(np.min(values))
+        value_max = float(np.max(values))
+        span = value_max - value_min
+        padding = max(0.005, 0.08 * max(span, 0.01))
+        bin_edges = np.linspace(
+            value_min - padding,
+            value_max + padding,
+            bin_count + 1,
+        )
+        ax.hist(
+            values,
+            bins=bin_edges,
+            color=selection_colors(selection_idx),
+            alpha=0.82,
+            edgecolor="black",
+            linewidth=0.7,
+        )
+        ax.axvline(mean, color="black", linestyle="--", linewidth=1.3, label=f"mean={mean:.3f}")
+        ax.axvline(
+            median,
+            color="black",
+            linestyle=":",
+            linewidth=1.3,
+            label=f"median={median:.3f}",
+        )
+        ax.set_title(
+            f"{RMSD_SELECTION_PLOT_TITLES[selection_name]} (n={values.size})"
+        )
+        ax.set_ylabel("Structures")
+        ax.grid(axis="y", alpha=0.2)
+        ax.legend(fontsize=8)
+
+    for unused_ax in axes_flat[len(RMSD_SELECTION_KEYS) :]:
+        unused_ax.remove()
+    for ax in axes_flat[: len(RMSD_SELECTION_KEYS)]:
+        ax.set_xlabel("Selection-fitted RMSD (Å)")
+
+    fig.suptitle(
+        "Sampled PDB vs Target PDB RMSD Distributions",
+        fontsize=15,
+    )
+    fig.savefig(path, dpi=220)
+    plt.close(fig)
+
+
 def compare_file(
     assigned_path: Path,
     base_path: Path,
     all_res: bool = False,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     conditioned_eval_path = conditioned_eval_path_for_assigned(assigned_path)
     metrics_path = conditioned_eval_json_path_for_assigned(assigned_path)
     metrics = load_metrics(metrics_path)
@@ -705,17 +1377,17 @@ def compare_file(
 
     residue_global = labels_to_residue_global(atom_conditioning, atom_resids, conditioned_eval_path)
     expected_local = global_to_local_labels(residue_global, cluster_counts, assigned_path)
+    vmd_selection_mask, vmd_resids_by_index = strict_vmd_selection_mask(
+        conditioned_eval_path,
+        metrics,
+        atom_resids,
+        expected_local.shape[0],
+    )
     if all_res:
         selection_mask = np.ones(expected_local.shape, dtype=bool)
-        vmd_resids_by_index = None
         selection = "all residues"
     else:
-        selection_mask, vmd_resids_by_index = strict_vmd_selection_mask(
-            conditioned_eval_path,
-            metrics,
-            atom_resids,
-            expected_local.shape[0],
-        )
+        selection_mask = vmd_selection_mask
         selection = VMD_SELECTION
     comparison = compare_labels(
         expected_local,
@@ -726,6 +1398,22 @@ def compare_file(
 
     sample_name = sample_name_for_assigned(assigned_path)
     source_type = source_type_for_path(assigned_path, base_path)
+    sampled_pdb_path, target_pdb_path = strict_rmsd_pdb_paths(
+        conditioned_eval_path,
+        metrics_path,
+        metrics,
+    )
+    selection_evaluations = evaluate_atom_selections(
+        sampled_pdb_path=sampled_pdb_path,
+        target_pdb_path=target_pdb_path,
+        conditioned_eval_path=conditioned_eval_path,
+        metrics=metrics,
+        atom_resids=atom_resids,
+        vmd_resids_by_index=vmd_resids_by_index,
+        expected_local=expected_local,
+        oracle_labels=oracle_labels,
+        assigned_path=assigned_path,
+    )
     row = {
         "source_type": source_type,
         "sample_name": sample_name,
@@ -736,6 +1424,14 @@ def compare_file(
         "sample_index": metrics.get("sample_index"),
         "seed": metrics.get("seed"),
         "selection": selection,
+        "sampled_pdb": str(sampled_pdb_path),
+        "target_pdb": str(target_pdb_path),
+        "sampled_pdb_npz_relation": selection_evaluations[0][
+            "sampled_pdb_npz_relation"
+        ],
+        "target_pdb_npz_relation": selection_evaluations[0][
+            "target_pdb_npz_relation"
+        ],
         "n_residues": comparison["n_residues"],
         "n_selected_residues": comparison["n_selected_residues"],
         "n_compared": comparison["n_compared"],
@@ -746,6 +1442,24 @@ def compare_file(
         "mean_abs_error": comparison["mean_abs_error"],
         "max_abs_error": comparison["max_abs_error"],
     }
+    for evaluation in selection_evaluations:
+        selection_name = evaluation["selection_name"]
+        row[f"rmsd_{selection_name}_angstrom"] = evaluation["pdb_rmsd_angstrom"]
+        row[f"rmsd_{selection_name}_atom_count"] = evaluation[
+            "selected_atom_count"
+        ]
+
+    selection_rows = []
+    for evaluation in selection_evaluations:
+        selection_rows.append(
+            {
+                "source_type": source_type,
+                "sample_name": sample_name,
+                "sampled_pdb": str(sampled_pdb_path),
+                "target_pdb": str(target_pdb_path),
+                **evaluation,
+            }
+        )
 
     residue_rows = []
     diff = comparison["diff"]
@@ -759,11 +1473,7 @@ def compare_file(
                 "source_type": source_type,
                 "sample_name": sample_name,
                 "residue_index": residue_idx,
-                "vmd_resid": (
-                    int(vmd_resids_by_index[residue_idx])
-                    if vmd_resids_by_index is not None
-                    else None
-                ),
+                "vmd_resid": int(vmd_resids_by_index[residue_idx]),
                 "expected_local_label": int(expected_local[residue_idx]),
                 "oracle_label": int(oracle_labels[residue_idx]),
                 "match": int(not bool(mismatches[residue_idx])),
@@ -777,8 +1487,8 @@ def compare_file(
     report_path = assigned_path.with_name(
         assigned_path.name.replace(ASSIGNED_TOKEN, "_conditioning_vs_oracle_report.txt", 1)
     )
-    write_per_sample_report(report_path, row)
-    return row, residue_rows
+    write_per_sample_report(report_path, row, selection_rows)
+    return row, residue_rows, selection_rows
 
 
 def main() -> None:
@@ -794,35 +1504,55 @@ def main() -> None:
 
     rows = []
     residue_rows = []
+    selection_rows = []
     for assigned_path in assigned_files:
-        row, per_residue = compare_file(assigned_path, base_path, all_res=args.all_res)
+        row, per_residue, per_selection = compare_file(
+            assigned_path,
+            base_path,
+            all_res=args.all_res,
+        )
         rows.append(row)
         residue_rows.extend(per_residue)
+        selection_rows.extend(per_selection)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = args.output_prefix
     sample_csv = out_dir / f"{prefix}_per_structure.csv"
     residue_csv = out_dir / f"{prefix}_per_residue.csv"
+    selection_csv = out_dir / f"{prefix}_per_selection.csv"
     report_path = out_dir / f"{prefix}_report.txt"
     plot_path = out_dir / f"{prefix}_errors.png"
+    rmsd_plot_path = out_dir / f"{prefix}_rmsd_histograms.png"
 
     rows = sorted(rows, key=lambda row: (row["source_type"], row["sample_name"]))
     residue_rows = sorted(
         residue_rows,
         key=lambda row: (row["source_type"], row["sample_name"], row["residue_index"]),
     )
+    selection_rows = sorted(
+        selection_rows,
+        key=lambda row: (
+            row["source_type"],
+            row["sample_name"],
+            RMSD_SELECTION_KEYS.index(row["selection_name"]),
+        ),
+    )
     summary = summarize_rows(rows)
     write_sample_csv(sample_csv, rows)
     write_residue_csv(residue_csv, residue_rows)
-    write_summary_report(report_path, rows, summary)
+    write_selection_csv(selection_csv, selection_rows)
+    write_summary_report(report_path, rows, summary, selection_rows)
     plot_summary(plot_path, rows)
+    plot_rmsd_histograms(rmsd_plot_path, rows)
 
     scope = "all residues" if args.all_res else VMD_SELECTION
     print(f"Processed {len(rows)} assigned cluster file(s) using: {scope}")
     print(f"Wrote per-structure CSV: {sample_csv}")
     print(f"Wrote per-residue CSV: {residue_csv}")
+    print(f"Wrote per-selection CSV: {selection_csv}")
     print(f"Wrote report: {report_path}")
     print(f"Wrote error plot: {plot_path}")
+    print(f"Wrote RMSD histogram plot: {rmsd_plot_path}")
 
 
 if __name__ == "__main__":

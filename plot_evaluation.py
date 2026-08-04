@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot assigned-cluster label matches against the reference cluster labels."""
+"""Plot oracle-assigned cluster labels against the sampling conditioning labels."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.ticker import MultipleLocator  # noqa: E402
 import numpy as np  # noqa: E402
 
 
@@ -21,21 +20,62 @@ DEFAULT_REF_NPZ = Path(
     "/storage_common/angiod/phase-data/projects/a2a/systems/a2a_small/clusters/6d4a7baa-c096-494e-b417-c8014437d37d/cluster.npz"
 )
 MATCH_TOKEN = "_assigned_clusters.npz"
+CONDITIONED_EVAL_TOKEN = "_conditioned_eval.npz"
 IDX_RE = re.compile(r"(?:^|_)(\d+)_assigned_clusters\.npz$")
 FOLLOWING_LABEL_IDX_RE = re.compile(
     r"(?:^|_)following_label_(\d+)_assigned_clusters\.npz$"
 )
 DEFAULT_LABELS_KEY = "labels"
+VMD_SELECTION = (
+    "name CA and resid 2 to 30 35 to 65 69 to 104 113 to 138 "
+    "169 to 209 215 to 255 261 to 287 288 to 300"
+)
+VMD_RESID_RANGES = (
+    (2, 30),
+    (35, 65),
+    (69, 104),
+    (113, 138),
+    (169, 209),
+    (215, 255),
+    (261, 287),
+    (288, 300),
+)
+VMD_RESIDS = tuple(
+    resid
+    for first_resid, last_resid in VMD_RESID_RANGES
+    for resid in range(first_resid, last_resid + 1)
+)
+RESIDUE_KEY_PATTERN = re.compile(r"^res_(-?\d+)$")
 SOURCE_LABELS = {
     "active_samples": "active",
     "inactive_samples": "inactive",
     "pas_samples": "pas",
+    "anecag_samples": "anecag",
+    "theo_samples": "theo",
+    "inzma_samples": "inzma",
+    "all_structures_samples": "all_structures",
 }
-SOURCE_ORDER = ["active", "inactive", "pas"]
+MERGED_SOURCE = "all_structures"
+NEW_CATEGORY_ORDER = ("anecag", "theo", "inzma", "inactive")
+LEGACY_CATEGORY_ORDER = ("active", "inactive", "pas")
+CATEGORY_SCHEMAS = (NEW_CATEGORY_ORDER, LEGACY_CATEGORY_ORDER)
 SOURCE_COLORS = {
     "active": "#1f77b4",
+    "anecag": "#1f77b4",
+    "theo": "#ff7f0e",
+    "inzma": "#2ca02c",
     "inactive": "#d62728",
     "pas": "#2ca02c",
+    MERGED_SOURCE: "#6f4e9c",
+}
+SOURCE_DISPLAY_NAMES = {
+    "active": "ACTIVE",
+    "anecag": "ANECAG",
+    "theo": "THEO",
+    "inzma": "INZMA",
+    "inactive": "INACTIVE",
+    "pas": "PAS",
+    MERGED_SOURCE: "All structures",
 }
 
 
@@ -47,10 +87,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Find *_assigned_clusters.npz files, compare labels_assigned to "
-            "the corresponding reference labels, and plot histograms of exact "
-            "matches and differences. following_label_* samples are compared "
-            "to rows from the labels NPZ; other samples are compared to "
-            "merged__labels_assigned from the reference cluster NPZ."
+            "the conditioning labels saved with each sample, and plot one stacked "
+            "bar per structure: exact matches in green and differences in red. "
+            "A merged plot is always written. "
+            "A categorized plot is also written when every category in a supported "
+            "category set is present. Legacy samples without a companion "
+            "conditioned-evaluation NPZ fall back to the reference cluster NPZ. "
+            "Every available dataset is evaluated once across all residues and "
+            f"once using the strict VMD selection {VMD_SELECTION!r}."
         )
     )
     parser.add_argument(
@@ -74,7 +118,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output_name",
         default="assigned_cluster_match_histograms.png",
-        help="Output PNG filename.",
+        help="Merged output PNG filename.",
+    )
+    parser.add_argument(
+        "--category_output_name",
+        "--category-output-name",
+        dest="category_output_name",
+        default=None,
+        help=(
+            "Categorized output PNG filename. By default, '_by_category' is "
+            "inserted before the extension of --output_name. The file is only "
+            "written when a complete category set is present."
+        ),
+    )
+    parser.add_argument(
+        "--vmd_output_name",
+        "--vmd-output-name",
+        dest="vmd_output_name",
+        default=None,
+        help=(
+            "Merged strict-VMD-selection output PNG filename. By default, "
+            "'_vmd_selection' is inserted before the extension of --output_name."
+        ),
+    )
+    parser.add_argument(
+        "--vmd_category_output_name",
+        "--vmd-category-output-name",
+        dest="vmd_category_output_name",
+        default=None,
+        help=(
+            "Categorized strict-VMD-selection output PNG filename. By default, "
+            "'_by_category' is inserted into the VMD output filename."
+        ),
     )
     parser.add_argument(
         "--labels_npz",
@@ -129,12 +204,14 @@ def extract_source_type(sampled_npz: Path, base_path: Path) -> str:
         relative_parts = ()
 
     for part in relative_parts:
-        if part in SOURCE_LABELS:
-            return SOURCE_LABELS[part]
+        normalized_part = part.lower()
+        if normalized_part in SOURCE_LABELS:
+            return SOURCE_LABELS[normalized_part]
 
     for parent in sampled_npz.parents:
-        if parent.name in SOURCE_LABELS:
-            return SOURCE_LABELS[parent.name]
+        normalized_parent = parent.name.lower()
+        if normalized_parent in SOURCE_LABELS:
+            return SOURCE_LABELS[normalized_parent]
 
     expected_dirs = ", ".join(sorted(SOURCE_LABELS))
     raise ValueError(
@@ -143,9 +220,417 @@ def extract_source_type(sampled_npz: Path, base_path: Path) -> str:
     )
 
 
+def explicit_category_for_sample(sampled_npz: Path, base_path: Path) -> str | None:
+    """Return a category only when the sample lives in a category-specific tree."""
+    try:
+        source_type = extract_source_type(sampled_npz, base_path)
+    except ValueError:
+        return None
+    if source_type == MERGED_SOURCE:
+        return None
+    return source_type
+
+
 def companion_metrics_path(sampled_npz: Path) -> Path:
     return sampled_npz.with_name(
         sampled_npz.name.replace(MATCH_TOKEN, "_conditioned_eval.json", 1)
+    )
+
+
+def companion_conditioned_eval_path(sampled_npz: Path) -> Path:
+    return sampled_npz.with_name(
+        sampled_npz.name.replace(MATCH_TOKEN, CONDITIONED_EVAL_TOKEN, 1)
+    )
+
+
+def optional_npz_array(path: Path, key: str) -> np.ndarray | None:
+    with np.load(path, allow_pickle=False) as data:
+        if key not in data.files:
+            return None
+        return np.asarray(data[key])
+
+
+def load_conditioning_labels(conditioned_eval_path: Path) -> np.ndarray:
+    labels = optional_npz_array(conditioned_eval_path, "conditioning_cluster_labels")
+    if labels is None:
+        labels = optional_npz_array(conditioned_eval_path, "original_cluster_labels")
+    if labels is None:
+        raise KeyError(
+            f"{conditioned_eval_path} is missing both 'conditioning_cluster_labels' "
+            "and 'original_cluster_labels'."
+        )
+    return one_dimensional_labels(
+        labels,
+        "Conditioning labels",
+        conditioned_eval_path,
+    ).astype(np.int64, copy=False)
+
+
+def load_cluster_counts(sampled_npz: Path) -> np.ndarray:
+    cluster_counts = optional_npz_array(sampled_npz, "cluster_counts")
+    if cluster_counts is None:
+        cluster_counts = optional_npz_array(sampled_npz, "merged__cluster_counts")
+    if cluster_counts is None:
+        raise KeyError(
+            f"{sampled_npz} is missing both 'cluster_counts' and "
+            "'merged__cluster_counts'."
+        )
+    return one_dimensional_labels(
+        cluster_counts,
+        "Cluster counts",
+        sampled_npz,
+    ).astype(np.int64, copy=False)
+
+
+def load_metrics(metrics_path: Path) -> dict[str, object]:
+    if not metrics_path.is_file():
+        return {}
+    with metrics_path.open() as handle:
+        return json.load(handle)
+
+
+def load_atom_resids(
+    conditioned_eval_path: Path,
+    metrics_path: Path,
+) -> np.ndarray:
+    atom_resids = optional_npz_array(conditioned_eval_path, "atom_resids")
+    if atom_resids is not None:
+        return one_dimensional_labels(
+            atom_resids,
+            "Atom residue indices",
+            conditioned_eval_path,
+        ).astype(np.int64, copy=False)
+
+    metrics = load_metrics(metrics_path)
+    raw_npz = metrics.get("raw_npz_path")
+    if raw_npz:
+        raw_npz_path = Path(str(raw_npz)).expanduser()
+        if not raw_npz_path.is_absolute():
+            raw_npz_path = metrics_path.parent / raw_npz_path
+        if raw_npz_path.is_file():
+            atom_resids = optional_npz_array(raw_npz_path, "atom_resids")
+            if atom_resids is not None:
+                return one_dimensional_labels(
+                    atom_resids,
+                    "Atom residue indices",
+                    raw_npz_path,
+                ).astype(np.int64, copy=False)
+
+    raise KeyError(
+        f"Could not load atom_resids for {conditioned_eval_path}. Expected "
+        "'atom_resids' in that NPZ or in the raw NPZ recorded by its companion JSON."
+    )
+
+
+def metadata_npz_paths(
+    sampled_npz: Path,
+    conditioned_eval_path: Path,
+    metrics_path: Path,
+    metrics: dict[str, object],
+    reference_npz: Path,
+) -> list[Path]:
+    paths = []
+    if conditioned_eval_path.is_file():
+        paths.append(conditioned_eval_path)
+
+    raw_npz = metrics.get("raw_npz_path")
+    if raw_npz:
+        raw_npz_path = Path(str(raw_npz)).expanduser()
+        if not raw_npz_path.is_absolute():
+            raw_npz_path = metrics_path.parent / raw_npz_path
+        raw_npz_path = raw_npz_path.resolve()
+        if raw_npz_path.is_file() and raw_npz_path not in paths:
+            paths.append(raw_npz_path)
+
+    if sampled_npz.is_file() and sampled_npz not in paths:
+        paths.append(sampled_npz)
+    if reference_npz.is_file() and reference_npz not in paths:
+        paths.append(reference_npz)
+    return paths
+
+
+def load_optional_metadata_array(
+    sampled_npz: Path,
+    conditioned_eval_path: Path,
+    metrics_path: Path,
+    metrics: dict[str, object],
+    reference_npz: Path,
+    key: str,
+) -> tuple[np.ndarray | None, Path | None]:
+    for candidate in metadata_npz_paths(
+        sampled_npz,
+        conditioned_eval_path,
+        metrics_path,
+        metrics,
+        reference_npz,
+    ):
+        try:
+            value = optional_npz_array(candidate, key)
+        except ValueError as exc:
+            if "Object arrays cannot be loaded" in str(exc):
+                continue
+            raise
+        if value is not None:
+            return value, candidate
+    return None, None
+
+
+def text_value(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def load_vmd_resids_by_residue_index(
+    sampled_npz: Path,
+    conditioned_eval_path: Path,
+    metrics_path: Path,
+    metrics: dict[str, object],
+    reference_npz: Path,
+    n_residues: int,
+) -> np.ndarray:
+    residue_keys, source_path = load_optional_metadata_array(
+        sampled_npz,
+        conditioned_eval_path,
+        metrics_path,
+        metrics,
+        reference_npz,
+        "residue_keys",
+    )
+    if residue_keys is None or source_path is None:
+        raise KeyError(
+            "The strict VMD-residue evaluation requires a non-object "
+            f"'residue_keys' array for {sampled_npz}. Expected it in the "
+            "conditioned-evaluation NPZ, its recorded raw NPZ, the assigned NPZ, "
+            "or the reference NPZ."
+        )
+
+    residue_keys = one_dimensional_labels(
+        residue_keys,
+        "Residue keys",
+        source_path,
+    )
+    if residue_keys.shape[0] != n_residues:
+        raise ValueError(
+            f"Residue keys for {source_path} contain {residue_keys.shape[0]} entries, "
+            f"but the cluster-label arrays contain {n_residues} residues."
+        )
+
+    vmd_resids = []
+    for residue_index, raw_key in enumerate(residue_keys):
+        key = text_value(raw_key)
+        match = RESIDUE_KEY_PATTERN.fullmatch(key)
+        if match is None:
+            raise ValueError(
+                f"Invalid residue key {key!r} at residue index {residue_index} in "
+                f"{source_path}; strict VMD selection requires keys of the form "
+                "'res_<integer>'."
+            )
+        vmd_resids.append(int(match.group(1)))
+
+    result = np.asarray(vmd_resids, dtype=np.int64)
+    unique, counts = np.unique(result, return_counts=True)
+    duplicate_resids = unique[counts != 1]
+    if duplicate_resids.size:
+        raise ValueError(
+            f"Duplicate VMD residue IDs in {source_path}: {duplicate_resids.tolist()}."
+        )
+    return result
+
+
+def validate_selected_ca_atoms(
+    sampled_npz: Path,
+    conditioned_eval_path: Path,
+    metrics_path: Path,
+    metrics: dict[str, object],
+    reference_npz: Path,
+    atom_resids: np.ndarray,
+    vmd_resids_by_index: np.ndarray,
+    selection_mask: np.ndarray,
+) -> None:
+    atom_names, source_path = load_optional_metadata_array(
+        sampled_npz,
+        conditioned_eval_path,
+        metrics_path,
+        metrics,
+        reference_npz,
+        "atom_names",
+    )
+    if atom_names is None or source_path is None:
+        return
+    atom_names = one_dimensional_labels(atom_names, "Atom names", source_path)
+    if atom_names.shape != atom_resids.shape:
+        raise ValueError(
+            f"Atom-name/residue-index shape mismatch for {source_path}: "
+            f"{atom_names.shape} vs {atom_resids.shape}."
+        )
+
+    normalized_names = np.asarray(
+        [text_value(name).strip().upper() for name in atom_names],
+        dtype=str,
+    )
+    invalid_ca_counts = {}
+    for residue_index in np.flatnonzero(selection_mask):
+        ca_count = int(
+            np.count_nonzero(
+                (atom_resids == residue_index) & (normalized_names == "CA")
+            )
+        )
+        if ca_count != 1:
+            resid = int(vmd_resids_by_index[residue_index])
+            invalid_ca_counts[resid] = ca_count
+    if invalid_ca_counts:
+        raise ValueError(
+            "The strict VMD query requires exactly one CA atom for every requested "
+            f"residue in {source_path}; invalid counts={invalid_ca_counts}."
+        )
+
+
+def strict_vmd_selection_mask(
+    sampled_npz: Path,
+    reference_npz: Path,
+    n_residues: int,
+) -> np.ndarray:
+    conditioned_eval_path = companion_conditioned_eval_path(sampled_npz)
+    metrics_path = companion_metrics_path(sampled_npz)
+    metrics = load_metrics(metrics_path)
+    vmd_resids_by_index = load_vmd_resids_by_residue_index(
+        sampled_npz,
+        conditioned_eval_path,
+        metrics_path,
+        metrics,
+        reference_npz,
+        n_residues,
+    )
+
+    selection_mask = np.isin(vmd_resids_by_index, VMD_RESIDS)
+    selected_resids = set(vmd_resids_by_index[selection_mask].tolist())
+    requested_resids = set(VMD_RESIDS)
+    if selected_resids != requested_resids:
+        missing = sorted(requested_resids - selected_resids)
+        unexpected = sorted(selected_resids - requested_resids)
+        raise ValueError(
+            "Residue metadata does not exactly satisfy the requested VMD query "
+            f"for {sampled_npz}. Missing={missing}; unexpected={unexpected}."
+        )
+    if int(selection_mask.sum()) != len(VMD_RESIDS):
+        raise ValueError(
+            f"Expected exactly {len(VMD_RESIDS)} selected residues for "
+            f"{sampled_npz}, got {int(selection_mask.sum())}."
+        )
+
+    atom_resids, atom_resids_path = load_optional_metadata_array(
+        sampled_npz,
+        conditioned_eval_path,
+        metrics_path,
+        metrics,
+        reference_npz,
+        "atom_resids",
+    )
+    if atom_resids is not None and atom_resids_path is not None:
+        atom_resids = one_dimensional_labels(
+            atom_resids,
+            "Atom residue indices",
+            atom_resids_path,
+        ).astype(np.int64, copy=False)
+        validate_selected_ca_atoms(
+            sampled_npz,
+            conditioned_eval_path,
+            metrics_path,
+            metrics,
+            reference_npz,
+            atom_resids,
+            vmd_resids_by_index,
+            selection_mask,
+        )
+    return selection_mask
+
+
+def labels_to_residue_global(
+    atom_global_labels: np.ndarray,
+    atom_resids: np.ndarray,
+    path: Path,
+) -> np.ndarray:
+    if atom_global_labels.shape != atom_resids.shape:
+        raise ValueError(
+            f"Atom label/residue shape mismatch for {path}: "
+            f"{atom_global_labels.shape} vs {atom_resids.shape}."
+        )
+    if atom_resids.size == 0:
+        raise ValueError(f"No atom residue indices found for {path}.")
+    if int(atom_resids.min()) < 0:
+        raise ValueError(f"Atom residue indices contain negative values for {path}.")
+
+    n_residues = int(atom_resids.max()) + 1
+    residue_global = np.full(n_residues, -1, dtype=np.int64)
+    for residue_idx in range(n_residues):
+        labels = atom_global_labels[atom_resids == residue_idx]
+        if labels.size == 0:
+            raise ValueError(f"Residue {residue_idx} has no atoms for {path}.")
+        labels = labels[labels >= 0]
+        if labels.size == 0:
+            continue
+        unique = np.unique(labels)
+        if unique.size != 1:
+            raise ValueError(
+                f"Conditioning labels are not residue-consistent for {path} at "
+                f"residue {residue_idx}: {unique[:20].tolist()}."
+            )
+        residue_global[residue_idx] = int(unique[0])
+    return residue_global
+
+
+def global_to_local_labels(
+    residue_global_labels: np.ndarray,
+    cluster_counts: np.ndarray,
+    path: Path,
+) -> np.ndarray:
+    if residue_global_labels.shape != cluster_counts.shape:
+        raise ValueError(
+            f"Residue global label shape {residue_global_labels.shape} does not "
+            f"match cluster-count shape {cluster_counts.shape} for {path}."
+        )
+    if np.any(cluster_counts <= 0):
+        raise ValueError(f"Cluster counts must all be positive for {path}.")
+
+    offsets = np.concatenate(
+        [np.zeros(1, dtype=np.int64), np.cumsum(cluster_counts[:-1], dtype=np.int64)]
+    )
+    local = residue_global_labels - offsets
+    valid = residue_global_labels >= 0
+    invalid = valid & ((local < 0) | (local >= cluster_counts))
+    if np.any(invalid):
+        bad_residues = np.flatnonzero(invalid)[:20].tolist()
+        raise ValueError(
+            f"Global-to-local label conversion failed for {path} at residues "
+            f"{bad_residues}."
+        )
+    local[~valid] = -1
+    return local.astype(np.int64, copy=False)
+
+
+def conditioning_labels_for_sample(sampled_npz: Path) -> np.ndarray:
+    conditioned_eval_path = companion_conditioned_eval_path(sampled_npz)
+    if not conditioned_eval_path.is_file():
+        raise FileNotFoundError(
+            f"Conditioned-evaluation NPZ not found for {sampled_npz}: "
+            f"{conditioned_eval_path}"
+        )
+
+    atom_global_labels = load_conditioning_labels(conditioned_eval_path)
+    atom_resids = load_atom_resids(
+        conditioned_eval_path,
+        companion_metrics_path(sampled_npz),
+    )
+    residue_global_labels = labels_to_residue_global(
+        atom_global_labels,
+        atom_resids,
+        conditioned_eval_path,
+    )
+    return global_to_local_labels(
+        residue_global_labels,
+        load_cluster_counts(sampled_npz),
+        sampled_npz,
     )
 
 
@@ -295,6 +780,7 @@ def count_label_matches(
     reference_labels: np.ndarray,
     sampled_labels: np.ndarray,
     sampled_npz: Path,
+    selection_mask: np.ndarray | None = None,
 ) -> tuple[int, int]:
     reference_labels = one_dimensional_labels(reference_labels, "Reference labels", sampled_npz)
     sampled_labels = one_dimensional_labels(sampled_labels, "Sampled labels", sampled_npz)
@@ -305,48 +791,170 @@ def count_label_matches(
             f"{reference_labels.shape}, sampled labels have shape {sampled_labels.shape}."
         )
 
-    exact_match_count = int(np.count_nonzero(reference_labels == sampled_labels))
-    difference_count = int(sampled_labels.size - exact_match_count)
+    has_explicit_selection = selection_mask is not None
+    if selection_mask is None:
+        selection_mask = np.ones(reference_labels.shape, dtype=bool)
+    else:
+        selection_mask = one_dimensional_labels(
+            selection_mask,
+            "Residue selection mask",
+            sampled_npz,
+        ).astype(bool, copy=False)
+        if selection_mask.shape != reference_labels.shape:
+            raise ValueError(
+                f"Residue selection mask for {sampled_npz} has shape "
+                f"{selection_mask.shape}, expected {reference_labels.shape}."
+            )
+
+    comparable = (reference_labels >= 0) & (sampled_labels >= 0)
+    if has_explicit_selection and np.any(selection_mask & ~comparable):
+        invalid_residue_indices = np.flatnonzero(selection_mask & ~comparable).tolist()
+        raise ValueError(
+            "Every residue in the strict VMD selection must have two valid labels "
+            f"for {sampled_npz}; invalid residue indices={invalid_residue_indices}."
+        )
+    valid = comparable & selection_mask
+    if not np.any(valid):
+        raise ValueError(f"No comparable residue labels for {sampled_npz}.")
+    exact_match_count = int(
+        np.count_nonzero(reference_labels[valid] == sampled_labels[valid])
+    )
+    difference_count = int(np.count_nonzero(valid) - exact_match_count)
     return exact_match_count, difference_count
 
 
-def integer_bins(values: list[int]) -> np.ndarray:
-    min_value = min(values)
-    max_value = max(values)
-    return np.arange(min_value - 0.5, max_value + 1.5, 1)
-
-
-def plot_integer_histogram(
-    ax: plt.Axes,
-    values_by_source: dict[str, list[int]],
-    title: str,
-    xlabel: str,
+def save_stacked_match_plot(
+    exact_matches_by_source: dict[str, list[int]],
+    differences_by_source: dict[str, list[int]],
+    source_order: tuple[str, ...],
+    output_path: Path,
+    title_suffix: str,
 ) -> None:
-    values = [
-        value
-        for source in SOURCE_ORDER
-        for value in values_by_source[source]
-    ]
-    min_value = min(values)
-    max_value = max(values)
-    sources_with_values = [
-        source for source in SOURCE_ORDER if values_by_source[source]
-    ]
+    exact_matches = []
+    differences = []
+    sample_labels = []
+    category_boundaries = []
+    for source in source_order:
+        source_exact = exact_matches_by_source[source]
+        source_differences = differences_by_source[source]
+        if len(source_exact) != len(source_differences):
+            raise ValueError(
+                f"Exact-match and difference counts have different lengths for "
+                f"{source!r}: {len(source_exact)} vs {len(source_differences)}."
+            )
+        if exact_matches and source_exact:
+            category_boundaries.append(len(exact_matches) - 0.5)
+        exact_matches.extend(source_exact)
+        differences.extend(source_differences)
+        for sample_number in range(1, len(source_exact) + 1):
+            if len(source_order) == 1:
+                sample_labels.append(str(sample_number))
+            else:
+                source_label = SOURCE_DISPLAY_NAMES.get(source, source.upper())
+                sample_labels.append(f"{source_label}\n{sample_number}")
 
-    ax.hist(
-        [values_by_source[source] for source in sources_with_values],
-        bins=integer_bins(values),
-        color=[SOURCE_COLORS[source] for source in sources_with_values],
+    if not exact_matches or not differences:
+        raise ValueError(f"Cannot create an empty stacked plot: {output_path}")
+
+    exact_array = np.asarray(exact_matches, dtype=np.int64)
+    difference_array = np.asarray(differences, dtype=np.int64)
+    x_positions = np.arange(exact_array.size)
+    totals = exact_array + difference_array
+
+    fig_width = max(8, exact_array.size * 0.55)
+    fig, ax = plt.subplots(figsize=(fig_width, 6), constrained_layout=True)
+    ax.bar(
+        x_positions,
+        exact_array,
+        width=0.78,
+        color="#2ca02c",
         edgecolor="black",
-        label=sources_with_values,
-        stacked=True,
+        linewidth=0.8,
+        label="Exact matches",
     )
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Count")
-    ax.set_xlim(min_value - 0.5, max_value + 0.5)
-    ax.xaxis.set_major_locator(MultipleLocator(1))
-    ax.tick_params(axis="x", labelrotation=90)
+    ax.bar(
+        x_positions,
+        difference_array,
+        width=0.78,
+        bottom=exact_array,
+        color="#d62728",
+        edgecolor="black",
+        linewidth=0.8,
+        label="Differences",
+    )
+
+    ax.set_title(f"Assigned-cluster label comparison — {title_suffix}")
+    ax.set_xlabel("Sample")
+    ax.set_ylabel("Residue count")
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(sample_labels, rotation=90 if exact_array.size > 12 else 0)
+    ax.set_xlim(-0.6, exact_array.size - 0.4)
+    ax.set_ylim(0, max(1, int(totals.max())) * 1.08)
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1), borderaxespad=0)
+
+    for boundary in category_boundaries:
+        ax.axvline(boundary, color="black", linewidth=0.8, alpha=0.45)
+
+    if exact_array.size <= 40:
+        for x_position, exact, difference in zip(
+            x_positions,
+            exact_array,
+            difference_array,
+            strict=True,
+        ):
+            if exact > 0:
+                ax.text(
+                    x_position,
+                    exact / 2,
+                    str(int(exact)),
+                    ha="center",
+                    va="center",
+                    color="white",
+                    fontsize=8,
+                    fontweight="bold",
+                )
+            if difference > 0:
+                ax.text(
+                    x_position,
+                    exact + difference / 2,
+                    str(int(difference)),
+                    ha="center",
+                    va="center",
+                    color="white",
+                    fontsize=8,
+                    fontweight="bold",
+                )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+
+
+def output_name_with_suffix(output_name: str, suffix_to_add: str) -> str:
+    output_path = Path(output_name)
+    extension = output_path.suffix or ".png"
+    return str(
+        output_path.with_name(f"{output_path.stem}{suffix_to_add}{extension}")
+    )
+
+
+def categorized_output_name(merged_output_name: str, explicit_name: str | None) -> str:
+    if explicit_name is not None:
+        return explicit_name
+    return output_name_with_suffix(merged_output_name, "_by_category")
+
+
+def complete_category_schema(
+    exact_matches_by_category: dict[str, list[int]],
+) -> tuple[str, ...] | None:
+    categories_with_values = {
+        category for category, values in exact_matches_by_category.items() if values
+    }
+    for schema in CATEGORY_SCHEMAS:
+        if set(schema).issubset(categories_with_values):
+            return schema
+    return None
 
 
 def main() -> None:
@@ -369,16 +977,27 @@ def main() -> None:
             f"No files containing {MATCH_TOKEN!r} were found under {base_path}"
         )
 
-    exact_matches_by_source: dict[str, list[int]] = {
-        source: [] for source in SOURCE_ORDER
+    merged_exact_matches: list[int] = []
+    merged_differences: list[int] = []
+    merged_vmd_exact_matches: list[int] = []
+    merged_vmd_differences: list[int] = []
+    exact_matches_by_category: dict[str, list[int]] = {
+        source: [] for source in SOURCE_COLORS if source != MERGED_SOURCE
     }
-    differences_by_source: dict[str, list[int]] = {
-        source: [] for source in SOURCE_ORDER
+    differences_by_category: dict[str, list[int]] = {
+        source: [] for source in SOURCE_COLORS if source != MERGED_SOURCE
+    }
+    vmd_exact_matches_by_category: dict[str, list[int]] = {
+        source: [] for source in SOURCE_COLORS if source != MERGED_SOURCE
+    }
+    vmd_differences_by_category: dict[str, list[int]] = {
+        source: [] for source in SOURCE_COLORS if source != MERGED_SOURCE
     }
     labels_cache: dict[tuple[Path, str], np.ndarray] = {}
 
     needs_reference_npz = any(
         extract_following_label_idx(sampled_npz) is None
+        and not companion_conditioned_eval_path(sampled_npz).is_file()
         for sampled_npz in sampled_structures
     )
     ref_data = None
@@ -397,10 +1016,21 @@ def main() -> None:
 
     try:
         for sampled_npz in sampled_structures:
-            source_type = extract_source_type(sampled_npz, base_path)
             sampled_labels = load_sampled_labels(sampled_npz)
             label_idx = extract_following_label_idx(sampled_npz)
-            if label_idx is None:
+            conditioned_eval_path = companion_conditioned_eval_path(sampled_npz)
+            if label_idx is not None:
+                reference_labels = labels_row_for_sample(
+                    sampled_npz,
+                    label_idx,
+                    labels_npz_arg,
+                    args.labels_key,
+                    labels_cache,
+                )
+            elif conditioned_eval_path.is_file():
+                reference_labels = conditioning_labels_for_sample(sampled_npz)
+            else:
+                source_type = extract_source_type(sampled_npz, base_path)
                 idx = extract_idx(sampled_npz)
                 if ref_labels_all is None or reference_lookup is None:
                     raise RuntimeError("Reference NPZ was not loaded.")
@@ -411,65 +1041,129 @@ def main() -> None:
                         f"reference labels only contain {ref_labels_all.shape[0]} frame(s)."
                     )
                 reference_labels = ref_labels_all[ref_row_idx]
-            else:
-                reference_labels = labels_row_for_sample(
-                    sampled_npz,
-                    label_idx,
-                    labels_npz_arg,
-                    args.labels_key,
-                    labels_cache,
-                )
 
             exact_match_count, difference_count = count_label_matches(
                 reference_labels,
                 sampled_labels,
                 sampled_npz,
             )
-            exact_matches_by_source[source_type].append(int(exact_match_count))
-            differences_by_source[source_type].append(int(difference_count))
+            n_residues = one_dimensional_labels(
+                sampled_labels,
+                "Sampled labels",
+                sampled_npz,
+            ).shape[0]
+            vmd_selection_mask = strict_vmd_selection_mask(
+                sampled_npz,
+                ref_npz,
+                n_residues,
+            )
+            vmd_exact_match_count, vmd_difference_count = count_label_matches(
+                reference_labels,
+                sampled_labels,
+                sampled_npz,
+                selection_mask=vmd_selection_mask,
+            )
+            merged_exact_matches.append(exact_match_count)
+            merged_differences.append(difference_count)
+            merged_vmd_exact_matches.append(vmd_exact_match_count)
+            merged_vmd_differences.append(vmd_difference_count)
+
+            category = explicit_category_for_sample(sampled_npz, base_path)
+            if category is not None:
+                if category not in exact_matches_by_category:
+                    exact_matches_by_category[category] = []
+                    differences_by_category[category] = []
+                    vmd_exact_matches_by_category[category] = []
+                    vmd_differences_by_category[category] = []
+                    SOURCE_COLORS[category] = "#7f7f7f"
+                    SOURCE_DISPLAY_NAMES[category] = category.upper()
+                exact_matches_by_category[category].append(exact_match_count)
+                differences_by_category[category].append(difference_count)
+                vmd_exact_matches_by_category[category].append(
+                    vmd_exact_match_count
+                )
+                vmd_differences_by_category[category].append(vmd_difference_count)
     finally:
         if ref_data is not None:
             ref_data.close()
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    output_path = out_dir / args.output_name
-
-    exact_matches = [
-        value
-        for source in SOURCE_ORDER
-        for value in exact_matches_by_source[source]
-    ]
-    differences = [
-        value
-        for source in SOURCE_ORDER
-        for value in differences_by_source[source]
-    ]
-    max_integer_range = max(
-        max(exact_matches) - min(exact_matches) + 1,
-        max(differences) - min(differences) + 1,
+    merged_output_path = out_dir / args.output_name
+    save_stacked_match_plot(
+        {MERGED_SOURCE: merged_exact_matches},
+        {MERGED_SOURCE: merged_differences},
+        (MERGED_SOURCE,),
+        merged_output_path,
+        "All Structures — All Residues",
     )
-    fig_width = max(12, max_integer_range * 0.18)
-    fig, axes = plt.subplots(1, 2, figsize=(fig_width, 5), constrained_layout=True)
-
-    plot_integer_histogram(
-        axes[0],
-        exact_matches_by_source,
-        "Exact Matches",
-        "Number of matching labels",
+    vmd_output_name = args.vmd_output_name or output_name_with_suffix(
+        args.output_name,
+        "_vmd_selection",
     )
-    plot_integer_histogram(
-        axes[1],
-        differences_by_source,
-        "Differences",
-        "Number of differing labels",
+    vmd_output_path = out_dir / vmd_output_name
+    save_stacked_match_plot(
+        {MERGED_SOURCE: merged_vmd_exact_matches},
+        {MERGED_SOURCE: merged_vmd_differences},
+        (MERGED_SOURCE,),
+        vmd_output_path,
+        "All Structures — Strict VMD Selection",
     )
-    axes[1].legend(title="Source")
-
-    fig.savefig(output_path, dpi=300)
-    plt.close(fig)
 
     print(f"Processed {len(sampled_structures)} file(s).")
-    print(f"Saved histogram plot to: {output_path}")
+    print(f"Saved all-residue merged stacked plot to: {merged_output_path}")
+    print(
+        f"Saved strict-VMD-selection merged stacked plot ({len(VMD_RESIDS)} "
+        f"residues) to: {vmd_output_path}"
+    )
+
+    category_schema = complete_category_schema(exact_matches_by_category)
+    if category_schema is not None:
+        category_output_path = out_dir / categorized_output_name(
+            args.output_name,
+            args.category_output_name,
+        )
+        save_stacked_match_plot(
+            exact_matches_by_category,
+            differences_by_category,
+            category_schema,
+            category_output_path,
+            "By Category — All Residues",
+        )
+        vmd_category_output_path = out_dir / (
+            args.vmd_category_output_name
+            or categorized_output_name(vmd_output_name, None)
+        )
+        save_stacked_match_plot(
+            vmd_exact_matches_by_category,
+            vmd_differences_by_category,
+            category_schema,
+            vmd_category_output_path,
+            "By Category — Strict VMD Selection",
+        )
+        print(
+            f"Saved all-residue categorized stacked plot to: {category_output_path}"
+        )
+        print(
+            "Saved strict-VMD-selection categorized stacked plot to: "
+            f"{vmd_category_output_path}"
+        )
+    else:
+        categories_with_values = [
+            SOURCE_DISPLAY_NAMES.get(category, category.upper())
+            for category, values in exact_matches_by_category.items()
+            if values
+        ]
+        if categories_with_values:
+            found = ", ".join(categories_with_values)
+            print(
+                "Skipped categorized plot because no complete category set "
+                f"was present. Found: {found}."
+            )
+        else:
+            print(
+                "Skipped categorized plot because the inputs are from the "
+                "merged all_structures dataset."
+            )
 
 
 if __name__ == "__main__":

@@ -95,8 +95,6 @@ for TYPE in "${STRUCTURE_TYPES[@]}"; do
         --out-dir "${TYPE_OUTPUT_DIR}" \
         --all-res
 
-    echo "Plotting assigned-cluster evaluation for TYPE=${TYPE}"
-    python plot_evaluation.py --base_path "${TYPE_OUTPUT_DIR}" --out_dir "${TYPE_OUTPUT_DIR}"
 done
 
 echo "Comparing original conditioning vs oracle labels across all structure types"
@@ -105,5 +103,5 @@ python scripts/compare_conditioning_to_oracle.py \
     --out-dir "${OUTPUT_ROOT}" \
     --all-res
 
-# echo "Plotting assigned-cluster evaluation across all structure types"
-# python plot_evaluation.py --base_path "${OUTPUT_ROOT}" --out_dir "${OUTPUT_ROOT}"
+echo "Plotting assigned-cluster evaluation across all structure types"
+python plot_evaluation.py --base_path "${OUTPUT_ROOT}" --out_dir "${OUTPUT_ROOT}"
