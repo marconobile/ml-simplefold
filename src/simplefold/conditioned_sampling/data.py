@@ -114,87 +114,152 @@ def choose_frame_position(
         raise ValueError(f"--frame-index must be in [0, {nframes - 1}], got {frame_index}.")
     return int(frame_index)
 
+
+class RawNpzFrameLoader:
+    """Load raw NPZ arrays once and expose individual trajectory frames.
+
+    This is primarily used for ordered whole-file sampling. Reopening a compressed
+    NPZ for every frame would repeatedly decompress its largest arrays.
+    """
+
+    def __init__(self, raw_npz_path: Path) -> None:
+        self.raw_npz_path = raw_npz_path
+        self._data = np.load(raw_npz_path, allow_pickle=False)
+        try:
+            required = {
+                "trajectory",
+                CLUSTER_KEY,
+                "dihedrals",
+                "dihedral_atom_indices",
+                "dihedral_mask",
+            }
+            missing = sorted(required - set(self._data.files))
+            if missing:
+                raise KeyError(f"Raw NPZ is missing required key(s): {', '.join(missing)}")
+
+            self.trajectory = self._data["trajectory"]
+            if self.trajectory.ndim != 3 or self.trajectory.shape[-1] != 3:
+                raise ValueError(
+                    "`trajectory` must have shape (n_frames, n_atoms, 3), "
+                    f"got {self.trajectory.shape}."
+                )
+
+            self.nframes, self.natoms, _ = self.trajectory.shape
+            if self.nframes == 0:
+                raise ValueError("`trajectory` contains zero frames.")
+
+            self.cluster_labels = self._data[CLUSTER_KEY]
+            if self.cluster_labels.shape != (self.nframes, self.natoms):
+                raise ValueError(
+                    f"`{CLUSTER_KEY}` must have shape "
+                    f"({self.nframes}, {self.natoms}), got {self.cluster_labels.shape}."
+                )
+
+            self.dihedrals = self._data["dihedrals"]
+            if self.dihedrals.ndim < 1 or self.dihedrals.shape[0] != self.nframes:
+                raise ValueError(
+                    "`dihedrals` must have one row per trajectory frame, "
+                    f"got {self.dihedrals.shape} for {self.nframes} frames."
+                )
+
+            frame_indices = (
+                self._data["frame_indices"].astype(np.int64, copy=False)
+                if "frame_indices" in self._data.files
+                else np.arange(self.nframes, dtype=np.int64)
+            )
+            if frame_indices.shape != (self.nframes,):
+                frame_indices = np.arange(self.nframes, dtype=np.int64)
+            self.frame_indices = frame_indices
+
+            self.sample_id = np_scalar_to_string(
+                self._data,
+                "sample_id",
+                raw_npz_path.stem,
+            )
+            self.record_prefix = sanitize_record_prefix(raw_npz_path.stem)
+            self.dihedral_atom_indices = np.asarray(
+                self._data["dihedral_atom_indices"],
+                dtype=np.int64,
+            )
+            self.dihedral_mask = np.asarray(self._data["dihedral_mask"], dtype=bool)
+            self.dihedral_keys = (
+                np.asarray(self._data["dihedral_keys"]).astype(str).tolist()
+                if "dihedral_keys" in self._data.files
+                else [f"dihedral_{i}" for i in range(self.dihedrals.shape[-1])]
+            )
+            self.atom_names = (
+                np.asarray(self._data["atom_names"]).astype(str)
+                if "atom_names" in self._data.files
+                else np.asarray([f"A{i}" for i in range(self.natoms)], dtype="U8")
+            )
+            self.atom_resids = (
+                np.asarray(self._data["atom_resids"], dtype=np.int64)
+                if "atom_resids" in self._data.files
+                else None
+            )
+        except Exception:
+            self._data.close()
+            raise
+
+    def __len__(self) -> int:
+        return int(self.nframes)
+
+    def close(self) -> None:
+        if self._data is not None:
+            self._data.close()
+            self._data = None
+
+    def load_frame(self, frame_position: int) -> dict[str, Any]:
+        if frame_position < 0 or frame_position >= self.nframes:
+            raise ValueError(
+                f"Frame position must be in [0, {self.nframes - 1}], "
+                f"got {frame_position}."
+            )
+
+        frame_number = int(self.frame_indices[frame_position])
+        record_id = f"{self.record_prefix}_{frame_number:06d}"
+        selected_sample = np.asarray(
+            self.trajectory[frame_position],
+            dtype=np.float32,
+        )
+        original_cluster_labels = np.asarray(
+            self.cluster_labels[frame_position],
+            dtype=np.int64,
+        )
+        if original_cluster_labels.min(initial=0) < -1:
+            raise ValueError(f"`{CLUSTER_KEY}` contains labels below -1.")
+
+        return {
+            "selected_sample": selected_sample.copy(),
+            "original_coords": selected_sample.copy(),
+            "original_cluster_labels": original_cluster_labels.copy(),
+            "original_dihedrals": np.asarray(
+                self.dihedrals[frame_position],
+                dtype=np.float32,
+            ).copy(),
+            "dihedral_atom_indices": self.dihedral_atom_indices,
+            "dihedral_mask": self.dihedral_mask,
+            "dihedral_keys": self.dihedral_keys,
+            "atom_names": self.atom_names,
+            "atom_resids": self.atom_resids,
+            "frame_position": int(frame_position),
+            "frame_index": frame_number,
+            "record_id": record_id,
+            "sample_id": self.sample_id,
+        }
+
+
 def load_raw_frame(
     raw_npz_path: Path,
     frame_index: int | None,
     rng: np.random.Generator,
 ) -> dict[str, Any]:
-    with np.load(raw_npz_path, allow_pickle=False) as data:
-        required = {
-            "trajectory",
-            CLUSTER_KEY,
-            "dihedrals",
-            "dihedral_atom_indices",
-            "dihedral_mask",
-        }
-        missing = sorted(required - set(data.files))
-        if missing:
-            raise KeyError(f"Raw NPZ is missing required key(s): {', '.join(missing)}")
-
-        trajectory = data["trajectory"]
-        if trajectory.ndim != 3 or trajectory.shape[-1] != 3:
-            raise ValueError(
-                f"`trajectory` must have shape (n_frames, n_atoms, 3), got {trajectory.shape}."
-            )
-
-        nframes, natoms, _ = trajectory.shape
-        frame_position = choose_frame_position(nframes, frame_index, rng)
-
-        frame_indices = (
-            data["frame_indices"].astype(np.int64, copy=False)
-            if "frame_indices" in data.files
-            else np.arange(nframes, dtype=np.int64)
-        )
-        if frame_indices.shape[0] != nframes:
-            frame_indices = np.arange(nframes, dtype=np.int64)
-        frame_number = int(frame_indices[frame_position])
-
-        sample_id = np_scalar_to_string(data, "sample_id", raw_npz_path.stem)
-        record_prefix = sanitize_record_prefix(raw_npz_path.stem)
-        record_id = f"{record_prefix}_{frame_number:06d}"
-
-        cluster_labels = data[CLUSTER_KEY]
-        dihedrals = data["dihedrals"]
-        selected_sample = np.asarray(trajectory[frame_position], dtype=np.float32)
-        original_cluster_labels = np.asarray(cluster_labels[frame_position], dtype=np.int64)
-        original_dihedrals = np.asarray(dihedrals[frame_position], dtype=np.float32)
-
-        if original_cluster_labels.shape != (natoms,):
-            raise ValueError(
-                f"`{CLUSTER_KEY}` frame must have shape ({natoms},), "
-                f"got {original_cluster_labels.shape}."
-            )
-        if original_cluster_labels.min(initial=0) < -1:
-            raise ValueError(f"`{CLUSTER_KEY}` contains labels below -1.")
-
-        payload = {
-            "selected_sample": selected_sample.copy(),
-            "original_coords": selected_sample.copy(),
-            "original_cluster_labels": original_cluster_labels.copy(),
-            "original_dihedrals": original_dihedrals.copy(),
-            "dihedral_atom_indices": np.asarray(data["dihedral_atom_indices"], dtype=np.int64),
-            "dihedral_mask": np.asarray(data["dihedral_mask"], dtype=bool),
-            "dihedral_keys": (
-                np.asarray(data["dihedral_keys"]).astype(str).tolist()
-                if "dihedral_keys" in data.files
-                else [f"dihedral_{i}" for i in range(original_dihedrals.shape[-1])]
-            ),
-            "atom_names": (
-                np.asarray(data["atom_names"]).astype(str)
-                if "atom_names" in data.files
-                else np.asarray([f"A{i}" for i in range(natoms)], dtype="U8")
-            ),
-            "atom_resids": (
-                np.asarray(data["atom_resids"], dtype=np.int64)
-                if "atom_resids" in data.files
-                else None
-            ),
-            "frame_position": frame_position,
-            "frame_index": frame_number,
-            "record_id": record_id,
-            "sample_id": sample_id,
-        }
-    return payload
+    loader = RawNpzFrameLoader(raw_npz_path)
+    try:
+        frame_position = choose_frame_position(len(loader), frame_index, rng)
+        return loader.load_frame(frame_position)
+    finally:
+        loader.close()
 
 def load_processed_frame(
     processed_dir: Path,

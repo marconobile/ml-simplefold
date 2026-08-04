@@ -12,6 +12,7 @@ from .cli import parse_args
 from .conditioning import prepare_conditioned_batch
 from .constants import CLUSTER_KEY
 from .data import (
+    RawNpzFrameLoader,
     load_conditioning_label_rows,
     load_processed_frame,
     load_raw_frame,
@@ -62,8 +63,11 @@ def load_input_frame(
     processed_dir,
     frame_index,
     rng,
+    raw_frame_loader: RawNpzFrameLoader | None = None,
 ) -> dict:
-    if raw_npz_path is not None:
+    if raw_frame_loader is not None:
+        frame_data = raw_frame_loader.load_frame(frame_index)
+    elif raw_npz_path is not None:
         print(f"Loading raw trajectory NPZ: {raw_npz_path}")
         frame_data = load_raw_frame(raw_npz_path, frame_index, rng)
     elif processed_dir is not None:
@@ -108,8 +112,10 @@ def main() -> None:
         raise ValueError("--num-steps must be > 0")
     if args.guidance_scale < 0:
         raise ValueError("--guidance-scale must be >= 0")
-    if args.num_samples is not None and args.num_samples <= 0:
-        raise ValueError("-N/--num-samples must be > 0")
+    if args.num_samples is not None and (
+        args.num_samples == 0 or args.num_samples < -1
+    ):
+        raise ValueError("-N/--num-samples must be -1 or > 0")
     if args.dihedral_angle_bins <= 0:
         raise ValueError("--dihedral-angle-bins must be > 0")
     if args.dihedral_error_bins <= 0:
@@ -125,6 +131,17 @@ def main() -> None:
     )
     raw_npz_path = resolve_raw_npz_path(data_path, args.raw_npz_path)
     labels_npz_path = resolve_labels_npz_path(args.labels_npz_path)
+    ordered_raw_sampling = args.num_samples == -1
+    if ordered_raw_sampling and labels_npz_path is not None:
+        raise ValueError("-N=-1 cannot be combined with --labels-npz-path.")
+    if ordered_raw_sampling and raw_npz_path is None:
+        raise ValueError("-N=-1 requires a raw NPZ input via --raw-npz-path or --data-path.")
+    if ordered_raw_sampling and args.frame_index is not None:
+        raise ValueError("-N=-1 processes the whole raw NPZ; remove --frame-index.")
+
+    raw_frame_loader = (
+        RawNpzFrameLoader(raw_npz_path) if ordered_raw_sampling else None
+    )
     checkpoint_path = resolve_checkpoint_path(args)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -144,6 +161,8 @@ def main() -> None:
     num_samples = (
         int(conditioning_label_rows.shape[0])
         if conditioning_label_rows is not None
+        else len(raw_frame_loader)
+        if raw_frame_loader is not None
         else int(args.num_samples or 1)
     )
 
@@ -197,14 +216,21 @@ def main() -> None:
             }
         )
     else:
-        print(f"Preparing {num_samples} conditioned sample input(s).")
-        for sample_index in range(num_samples):
+        if ordered_raw_sampling:
+            print(
+                f"Preparing an ordered whole-file run over {num_samples} raw NPZ frame(s)."
+            )
+        else:
+            print(f"Preparing {num_samples} conditioned sample input(s).")
+        num_contexts = 1 if ordered_raw_sampling else num_samples
+        for sample_index in range(num_contexts):
             sample_seed = sample_seed_for_index(args.seed, sample_index)
             frame_data = load_input_frame(
                 raw_npz_path=raw_npz_path,
                 processed_dir=processed_dir,
-                frame_index=args.frame_index,
+                frame_index=sample_index if ordered_raw_sampling else args.frame_index,
                 rng=make_sample_rng(args.seed, sample_index),
+                raw_frame_loader=raw_frame_loader,
             )
             log_frame_selection(frame_data, template=False)
             batch, structure, record = prepare_conditioned_batch(
@@ -273,8 +299,29 @@ def main() -> None:
     )
 
     if conditioning_label_rows is None:
-        print(f"Running raw/processed sampling mode: generating {num_samples} sample(s).")
-        for context in sample_contexts:
+        if ordered_raw_sampling:
+            print(
+                "Running ordered raw-NPZ sampling mode: generating one sample for "
+                f"each of {num_samples} frame(s)."
+            )
+            contexts = (sample_contexts[0] for _ in range(num_samples))
+        else:
+            print(f"Running raw/processed sampling mode: generating {num_samples} sample(s).")
+            contexts = iter(sample_contexts)
+
+        for sample_index, context in enumerate(contexts):
+            if ordered_raw_sampling and sample_index > 0:
+                context["sample_index"] = sample_index
+                context["sample_seed"] = sample_seed_for_index(args.seed, sample_index)
+                context["frame_data"] = load_input_frame(
+                    raw_npz_path=raw_npz_path,
+                    processed_dir=processed_dir,
+                    frame_index=sample_index,
+                    rng=make_sample_rng(args.seed, sample_index),
+                    raw_frame_loader=raw_frame_loader,
+                )
+                log_frame_selection(context["frame_data"], template=False)
+
             sample_seed = context["sample_seed"]
             if sample_seed is not None:
                 seed_torch_sampling(sample_seed)
@@ -299,7 +346,10 @@ def main() -> None:
                 sample_seed=sample_seed,
                 evaluate_against_original=True,
             )
-            context["batch"] = move_batch_tensors(batch, torch.device("cpu"))
+            if not ordered_raw_sampling:
+                context["batch"] = move_batch_tensors(batch, torch.device("cpu"))
+        if raw_frame_loader is not None:
+            raw_frame_loader.close()
         return
 
     print(

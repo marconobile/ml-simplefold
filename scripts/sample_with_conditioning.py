@@ -6,6 +6,9 @@ previous monolithic workflow can be debugged one activity at a time. This file
 remains as the stable command-line entry point:
 
     python scripts/sample_with_conditioning.py [options]
+
+Use ``-N -1`` with a raw NPZ input to sample every trajectory frame in the
+order stored in that file.
 """
 
 from __future__ import annotations

@@ -255,7 +255,7 @@ def sample_conditioned_structure(
         sampled_cif_path=sampled_cif_path,
         configured_base_path=args.conditioned_eval_pdb_base_path,
         output_dir=args.output_dir,
-        current_file_only=labels_npz_path is not None,
+        current_file_only=(labels_npz_path is not None or args.num_samples == -1),
     )
     sampled_coords_for_pdb_validation = (
         aligned_sampled_coords if evaluate_against_original else sampled_coords

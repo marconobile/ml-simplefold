@@ -64,6 +64,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Number of conditioned structures to generate. Without --labels-npz-path, "
             "this samples N random observations from the raw NPZ or processed input. "
+            "Set N=-1 to process every observation from --raw-npz-path in file order. "
             "With --labels-npz-path, this samples the first N label rows. Defaults "
             "to 1 without labels and all rows with labels."
         ),
