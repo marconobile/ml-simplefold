@@ -23,3 +23,4 @@ training_data/structures/inapo.npz
 training_data/tokens/inapo.pkl
 training_data_backup/target_inapo/structures/inapo.npz
 traj_with_cluster_labels.npz
+good_model_backup_ANECAG_THEO_INZMA_INACTIVE_merged_last/last.ckpt
