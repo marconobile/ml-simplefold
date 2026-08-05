@@ -24,6 +24,10 @@ CONDITIONED_EVAL_TOKEN = "_conditioned_eval.npz"
 CONDITIONED_EVAL_JSON_TOKEN = "_conditioned_eval.json"
 CLUSTER_KEY = "atom_idx_and_glob_cluster_id_per_frame"
 SOURCE_SUFFIX = "_samples"
+DEFAULT_REFERENCE_PDB = Path(
+    "/home/nobilm@usi.ch/ml-simplefold/data/pdb_for_sampling_jupyter/"
+    "INApo_no_caps.pdb"
+)
 VMD_SELECTION = (
     "name CA and resid 2 to 30 35 to 65 69 to 104 113 to 138 "
     "169 to 209 215 to 255 261 to 287 288 to 300"
@@ -142,6 +146,15 @@ def parse_args() -> argparse.Namespace:
         "--output-prefix",
         default="conditioning_vs_oracle",
         help="Prefix for CSV, TXT, and PNG outputs.",
+    )
+    parser.add_argument(
+        "--reference-pdb",
+        type=Path,
+        default=DEFAULT_REFERENCE_PDB,
+        help=(
+            "Fixed reference PDB used for the per-selection sampled-vs-reference "
+            f"RMSDs shown in histogram titles. Defaults to {DEFAULT_REFERENCE_PDB}."
+        ),
     )
     parser.add_argument(
         "--all-res",
@@ -735,6 +748,81 @@ def validate_pdb_pair_and_metadata(
     )
 
 
+def is_hydrogen_atom_name(atom_name: str) -> bool:
+    return re.fullmatch(r"[0-9]?H.*", atom_name.upper()) is not None
+
+
+def reference_coords_in_sample_atom_order(
+    reference_pdb_path: Path,
+    atom_names: np.ndarray,
+    atom_resids: np.ndarray,
+    vmd_resids_by_index: np.ndarray,
+) -> np.ndarray:
+    reference_atoms = read_pdb_atoms(reference_pdb_path)
+    reference_chains = {atom.chain_id for atom in reference_atoms}
+    if len(reference_chains) != 1:
+        raise ValueError(
+            f"Reference PDB must contain exactly one atom-bearing chain, got "
+            f"{sorted(reference_chains)} in {reference_pdb_path}."
+        )
+    if any(atom.alternate_location for atom in reference_atoms):
+        raise ValueError(
+            f"Reference PDB contains alternate locations and cannot be mapped "
+            f"unambiguously: {reference_pdb_path}."
+        )
+    if any(atom.insertion_code for atom in reference_atoms):
+        raise ValueError(
+            f"Reference PDB contains insertion codes and cannot be matched strictly "
+            f"to VMD residue IDs: {reference_pdb_path}."
+        )
+
+    expected_vmd_resids = set(vmd_resids_by_index.tolist())
+    observed_vmd_resids = {atom.residue_number for atom in reference_atoms}
+    if observed_vmd_resids != expected_vmd_resids:
+        missing = sorted(expected_vmd_resids - observed_vmd_resids)
+        unexpected = sorted(observed_vmd_resids - expected_vmd_resids)
+        raise ValueError(
+            "Reference PDB residue IDs do not exactly match the sampled topology: "
+            f"reference={reference_pdb_path}; missing={missing}; unexpected={unexpected}."
+        )
+
+    reference_by_key: dict[tuple[int, str], PdbAtom] = {}
+    for atom in reference_atoms:
+        key = (atom.residue_number, atom.atom_name)
+        if key in reference_by_key:
+            raise ValueError(
+                f"Reference PDB has duplicate (resid, atom name) key {key}: "
+                f"{reference_pdb_path}."
+            )
+        reference_by_key[key] = atom
+
+    sample_keys = [
+        (int(vmd_resids_by_index[residue_index]), str(atom_name))
+        for residue_index, atom_name in zip(atom_resids, atom_names, strict=True)
+    ]
+    if len(set(sample_keys)) != len(sample_keys):
+        raise ValueError("Sampled topology has duplicate (VMD resid, atom name) keys.")
+    sample_key_set = set(sample_keys)
+    reference_heavy_keys = {
+        key
+        for key in reference_by_key
+        if not is_hydrogen_atom_name(key[1])
+    }
+    if reference_heavy_keys != sample_key_set:
+        missing = sorted(sample_key_set - reference_heavy_keys)[:20]
+        unexpected = sorted(reference_heavy_keys - sample_key_set)[:20]
+        raise ValueError(
+            "Reference/sample heavy-atom identities do not match exactly by "
+            f"(VMD resid, atom name): reference={reference_pdb_path}; "
+            f"missing={missing}; unexpected={unexpected}."
+        )
+
+    return np.asarray(
+        [reference_by_key[key].coords for key in sample_keys],
+        dtype=np.float64,
+    )
+
+
 def selection_fitted_rmsd(
     sampled_coords: np.ndarray,
     target_coords: np.ndarray,
@@ -775,6 +863,7 @@ def evaluate_atom_selections(
     *,
     sampled_pdb_path: Path,
     target_pdb_path: Path,
+    reference_pdb_path: Path,
     conditioned_eval_path: Path,
     metrics: dict[str, Any],
     atom_resids: np.ndarray,
@@ -796,6 +885,12 @@ def evaluate_atom_selections(
         metrics,
         atom_resids,
         expected_local.shape[0],
+    )
+    reference_coords = reference_coords_in_sample_atom_order(
+        reference_pdb_path,
+        atom_names,
+        atom_resids,
+        vmd_resids_by_index,
     )
     ca_mask = atom_names == "CA"
     ca_counts = np.bincount(
@@ -844,11 +939,18 @@ def evaluate_atom_selections(
                 "selected_residue_count": int(residue_mask.sum()),
                 "sampled_pdb_npz_relation": sampled_coordinate_relation,
                 "target_pdb_npz_relation": target_coordinate_relation,
+                "reference_pdb": str(reference_pdb_path),
                 "pdb_rmsd_angstrom": selection_fitted_rmsd(
                     sampled_coords,
                     target_coords,
                     atom_mask,
                     selection_name,
+                ),
+                "reference_pdb_rmsd_angstrom": selection_fitted_rmsd(
+                    sampled_coords,
+                    reference_coords,
+                    atom_mask,
+                    f"{selection_name} against fixed reference",
                 ),
                 "n_compared": comparison["n_compared"],
                 "match_count": comparison["match_count"],
@@ -1017,6 +1119,7 @@ def write_per_sample_report(
         "Sampled PDB vs target PDB selection-fitted RMSDs",
         f"  sampled_pdb: {row['sampled_pdb']}",
         f"  target_pdb: {row['target_pdb']}",
+        f"  fixed_reference_pdb: {row['reference_pdb']}",
         f"  sampled_pdb_npz_relation: {row['sampled_pdb_npz_relation']}",
         f"  target_pdb_npz_relation: {row['target_pdb_npz_relation']}",
     ]
@@ -1028,6 +1131,10 @@ def write_per_sample_report(
                 f"    atoms: {selection_row['selected_atom_count']}",
                 f"    residues: {selection_row['selected_residue_count']}",
                 f"    rmsd_angstrom: {selection_row['pdb_rmsd_angstrom']:.6f}",
+                (
+                    "    fixed_reference_rmsd_angstrom: "
+                    f"{selection_row['reference_pdb_rmsd_angstrom']:.6f}"
+                ),
                 (
                     f"    cluster_matches: {selection_row['match_count']}/"
                     f"{selection_row['n_compared']}"
@@ -1114,6 +1221,10 @@ def write_summary_report(
             [row["pdb_rmsd_angstrom"] for row in group],
             dtype=np.float64,
         )
+        reference_values = np.asarray(
+            [row["reference_pdb_rmsd_angstrom"] for row in group],
+            dtype=np.float64,
+        )
         n_compared = sum(int(row["n_compared"]) for row in group)
         matches = sum(int(row["match_count"]) for row in group)
         mismatches = sum(int(row["mismatch_count"]) for row in group)
@@ -1130,6 +1241,15 @@ def write_summary_report(
                 f"    median_angstrom: {float(np.median(values)):.6f}",
                 f"    min_angstrom: {float(np.min(values)):.6f}",
                 f"    max_angstrom: {float(np.max(values)):.6f}",
+                f"    fixed_reference_pdb: {group[0]['reference_pdb']}",
+                (
+                    "    fixed_reference_mean_angstrom: "
+                    f"{float(np.mean(reference_values)):.6f}"
+                ),
+                (
+                    "    fixed_reference_median_angstrom: "
+                    f"{float(np.median(reference_values)):.6f}"
+                ),
                 "",
             ]
         )
@@ -1158,6 +1278,7 @@ def write_sample_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "selection",
         "sampled_pdb",
         "target_pdb",
+        "reference_pdb",
         "sampled_pdb_npz_relation",
         "target_pdb_npz_relation",
         "n_residues",
@@ -1175,6 +1296,7 @@ def write_sample_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             [
                 f"rmsd_{selection_name}_angstrom",
                 f"rmsd_{selection_name}_atom_count",
+                f"reference_rmsd_{selection_name}_angstrom",
             ]
         )
     with path.open("w", newline="") as handle:
@@ -1190,6 +1312,7 @@ def write_selection_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "sample_name",
         "sampled_pdb",
         "target_pdb",
+        "reference_pdb",
         "selection_name",
         "selection_definition",
         "selected_atom_count",
@@ -1197,6 +1320,7 @@ def write_selection_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "sampled_pdb_npz_relation",
         "target_pdb_npz_relation",
         "pdb_rmsd_angstrom",
+        "reference_pdb_rmsd_angstrom",
         "n_compared",
         "match_count",
         "mismatch_count",
@@ -1282,6 +1406,12 @@ def plot_summary(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def plot_rmsd_histograms(path: Path, rows: list[dict[str, Any]]) -> None:
+    reference_paths = {str(row["reference_pdb"]) for row in rows}
+    if len(reference_paths) != 1:
+        raise ValueError(
+            f"RMSD histogram rows use multiple fixed references: {sorted(reference_paths)}."
+        )
+    reference_name = Path(next(iter(reference_paths))).name
     values_by_selection = {
         selection_name: np.asarray(
             [row[f"rmsd_{selection_name}_angstrom"] for row in rows],
@@ -1289,8 +1419,19 @@ def plot_rmsd_histograms(path: Path, rows: list[dict[str, Any]]) -> None:
         )
         for selection_name in RMSD_SELECTION_KEYS
     }
+    reference_values_by_selection = {
+        selection_name: np.asarray(
+            [row[f"reference_rmsd_{selection_name}_angstrom"] for row in rows],
+            dtype=np.float64,
+        )
+        for selection_name in RMSD_SELECTION_KEYS
+    }
     if not np.isfinite(np.concatenate(list(values_by_selection.values()))).all():
         raise ValueError("Cannot plot non-finite sampled-vs-target PDB RMSD values.")
+    if not np.isfinite(
+        np.concatenate(list(reference_values_by_selection.values()))
+    ).all():
+        raise ValueError("Cannot plot non-finite sampled-vs-reference PDB RMSD values.")
 
     bin_count = max(5, min(20, int(np.ceil(np.sqrt(len(rows))))))
 
@@ -1309,6 +1450,9 @@ def plot_rmsd_histograms(path: Path, rows: list[dict[str, Any]]) -> None:
         values = values_by_selection[selection_name]
         mean = float(np.mean(values))
         median = float(np.median(values))
+        reference_mean = float(
+            np.mean(reference_values_by_selection[selection_name])
+        )
         value_min = float(np.min(values))
         value_max = float(np.max(values))
         span = value_max - value_min
@@ -1335,7 +1479,8 @@ def plot_rmsd_histograms(path: Path, rows: list[dict[str, Any]]) -> None:
             label=f"median={median:.3f}",
         )
         ax.set_title(
-            f"{RMSD_SELECTION_PLOT_TITLES[selection_name]} (n={values.size})"
+            f"{RMSD_SELECTION_PLOT_TITLES[selection_name]} (n={values.size})\n"
+            f"average sampled vs {reference_name}: {reference_mean:.3f} Å"
         )
         ax.set_ylabel("Structures")
         ax.grid(axis="y", alpha=0.2)
@@ -1358,6 +1503,7 @@ def compare_file(
     assigned_path: Path,
     base_path: Path,
     all_res: bool = False,
+    reference_pdb_path: Path = DEFAULT_REFERENCE_PDB,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     conditioned_eval_path = conditioned_eval_path_for_assigned(assigned_path)
     metrics_path = conditioned_eval_json_path_for_assigned(assigned_path)
@@ -1406,6 +1552,7 @@ def compare_file(
     selection_evaluations = evaluate_atom_selections(
         sampled_pdb_path=sampled_pdb_path,
         target_pdb_path=target_pdb_path,
+        reference_pdb_path=reference_pdb_path,
         conditioned_eval_path=conditioned_eval_path,
         metrics=metrics,
         atom_resids=atom_resids,
@@ -1426,6 +1573,7 @@ def compare_file(
         "selection": selection,
         "sampled_pdb": str(sampled_pdb_path),
         "target_pdb": str(target_pdb_path),
+        "reference_pdb": str(reference_pdb_path),
         "sampled_pdb_npz_relation": selection_evaluations[0][
             "sampled_pdb_npz_relation"
         ],
@@ -1448,6 +1596,9 @@ def compare_file(
         row[f"rmsd_{selection_name}_atom_count"] = evaluation[
             "selected_atom_count"
         ]
+        row[f"reference_rmsd_{selection_name}_angstrom"] = evaluation[
+            "reference_pdb_rmsd_angstrom"
+        ]
 
     selection_rows = []
     for evaluation in selection_evaluations:
@@ -1457,6 +1608,7 @@ def compare_file(
                 "sample_name": sample_name,
                 "sampled_pdb": str(sampled_pdb_path),
                 "target_pdb": str(target_pdb_path),
+                "reference_pdb": str(reference_pdb_path),
                 **evaluation,
             }
         )
@@ -1495,8 +1647,11 @@ def main() -> None:
     args = parse_args()
     base_path = args.base_path.expanduser().resolve()
     out_dir = (args.out_dir or base_path).expanduser().resolve()
+    reference_pdb_path = args.reference_pdb.expanduser().resolve()
     if not base_path.is_dir():
         raise NotADirectoryError(f"Base path is not a directory: {base_path}")
+    if not reference_pdb_path.is_file():
+        raise FileNotFoundError(f"Reference PDB is not a file: {reference_pdb_path}")
 
     assigned_files = find_assigned_cluster_files(base_path)
     if not assigned_files:
@@ -1510,6 +1665,7 @@ def main() -> None:
             assigned_path,
             base_path,
             all_res=args.all_res,
+            reference_pdb_path=reference_pdb_path,
         )
         rows.append(row)
         residue_rows.extend(per_residue)

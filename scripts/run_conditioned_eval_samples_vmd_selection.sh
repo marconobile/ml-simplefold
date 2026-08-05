@@ -33,6 +33,9 @@ writes a separate histogram for each of these selections:
   4. Protein and not backbone
   5. All ATOM/HETATM records
 
+Each histogram title also reports the average sampled-structure RMSD against:
+  /home/nobilm@usi.ch/ml-simplefold/data/pdb_for_sampling_jupyter/INApo_no_caps.pdb
+
 Options:
   --all-res  Use all residues for the primary cluster-label comparison.
   -h, --help Show this help message.
@@ -48,12 +51,12 @@ EOF
 done
 
 # check for changes
-DEVICE="${DEVICE:-cuda:0}"
+DEVICE="${DEVICE:-cuda:3}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/checkpoints/last.ckpt}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue/deleteme}" # samples_cfg3_aip_selection_v2
+OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue/anecag_4k}" # samples_cfg3_aip_selection_v2
 
 # fixed
-N="${N:-5}"
+N="${N:--1}"
 BASE_SEED="${BASE_SEED:-123}"
 CONDA_ENV="${CONDA_ENV:-simplefold}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
