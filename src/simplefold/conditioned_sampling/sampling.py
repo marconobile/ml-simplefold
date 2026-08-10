@@ -150,6 +150,7 @@ def sample_conditioned_structure(
     aligned_sampled_coords = None
     atom_mask = None
     target_cif_path = None
+    target_pdb_path = None
     raw_sampled_cif_path = None
     atom_csv_path = None
     original_dihedrals = None
@@ -256,7 +257,12 @@ def sample_conditioned_structure(
         configured_base_path=args.conditioned_eval_pdb_base_path,
         output_dir=args.output_dir,
         current_file_only=(labels_npz_path is not None or args.num_samples == -1),
+        additional_required_cif_paths=(
+            (target_cif_path,) if target_cif_path is not None else ()
+        ),
     )
+    if target_cif_path is not None:
+        target_pdb_path = target_cif_path.with_suffix(".pdb")
     sampled_coords_for_pdb_validation = (
         aligned_sampled_coords if evaluate_against_original else sampled_coords
     )
@@ -318,6 +324,9 @@ def sample_conditioned_structure(
         ),
         "target_reference_cif_path": (
             str(target_cif_path) if target_cif_path is not None else None
+        ),
+        "target_reference_pdb_path": (
+            str(target_pdb_path) if target_pdb_path is not None else None
         ),
         "record_id": frame_data["record_id"],
         "raw_record_id": frame_data.get("raw_record_id"),
@@ -429,6 +438,8 @@ def sample_conditioned_structure(
     print(f"Wrote sampled PDB: {sampled_pdb_path}")
     if target_cif_path is not None:
         print(f"Wrote target CIF:  {target_cif_path}")
+    if target_pdb_path is not None:
+        print(f"Wrote target PDB:  {target_pdb_path}")
     if raw_sampled_cif_path is not None:
         print(f"Wrote raw sampled CIF: {raw_sampled_cif_path}")
     if atom_csv_path is not None:

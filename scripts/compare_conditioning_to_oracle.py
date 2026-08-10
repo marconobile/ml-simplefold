@@ -73,6 +73,7 @@ RMSD_SELECTIONS = (
     ),
 )
 RMSD_SELECTION_KEYS = tuple(key for key, _ in RMSD_SELECTIONS)
+ERROR_SELECTION_KEYS = ("vmd_ca_residues", "all_atoms")
 RMSD_SELECTION_DEFINITIONS = dict(RMSD_SELECTIONS)
 RMSD_SELECTION_PLOT_TITLES = {
     "vmd_ca_residues": "Strict VMD CA/resid selection",
@@ -81,6 +82,14 @@ RMSD_SELECTION_PLOT_TITLES = {
     "protein_not_backbone": "Protein and not backbone",
     "all_atoms": "All atoms",
 }
+RMSD_SELECTION_COLORS = {
+    "vmd_ca_residues": "#1b9e77",
+    "ca": "#d95f02",
+    "backbone": "#7570b3",
+    "protein_not_backbone": "#e7298a",
+    "all_atoms": "#66a61e",
+}
+VIOLIN_Y_AXIS_THRESHOLD_FRACTION = 0.05
 
 
 @dataclass(frozen=True)
@@ -153,7 +162,8 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_REFERENCE_PDB,
         help=(
             "Fixed reference PDB used for the per-selection sampled-vs-reference "
-            f"RMSDs shown in histogram titles. Defaults to {DEFAULT_REFERENCE_PDB}."
+            f"RMSDs reported in the CSV and text outputs. Defaults to "
+            f"{DEFAULT_REFERENCE_PDB}."
         ),
     )
     parser.add_argument(
@@ -1355,148 +1365,173 @@ def write_residue_csv(path: Path, residue_rows: list[dict[str, Any]]) -> None:
             writer.writerow({column: row.get(column) for column in columns})
 
 
-def plot_summary(path: Path, rows: list[dict[str, Any]]) -> None:
-    source_types = sorted({row["source_type"] for row in rows})
-    colors = plt.get_cmap("tab10")
-    color_by_source = {
-        source_type: colors(idx % 10) for idx, source_type in enumerate(source_types)
-    }
+def draw_violin(
+    ax: Any,
+    values: np.ndarray,
+    position: int,
+    color: Any,
+    width: float = 0.78,
+) -> None:
+    """Draw a violin without sample markers, with a constant-data fallback."""
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError("Violin data must be a non-empty one-dimensional array.")
+    if not np.isfinite(values).all():
+        raise ValueError("Cannot plot non-finite violin values.")
 
-    fig, axes = plt.subplots(
-        2,
-        1,
-        figsize=(max(10.0, 0.45 * len(rows)), 9.0),
-        constrained_layout=True,
+    scale = max(1.0, float(np.max(np.abs(values))))
+    has_density = (
+        values.size >= 2
+        and float(np.ptp(values)) > np.finfo(np.float64).eps * scale
     )
-    x = np.arange(len(rows))
-    mismatch_counts = np.asarray([row["mismatch_count"] for row in rows], dtype=np.int64)
-    mismatch_fracs = np.asarray([row["mismatch_fraction"] for row in rows], dtype=np.float64)
-    bar_colors = [color_by_source[row["source_type"]] for row in rows]
-
-    axes[0].bar(x, mismatch_counts, color=bar_colors, edgecolor="black", linewidth=0.4)
-    axes[0].set_title("Conditioning vs Oracle Mismatches Per Structure")
-    axes[0].set_ylabel("Mismatching residues")
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels([row["sample_name"] for row in rows], rotation=90, fontsize=7)
-
-    bins = np.linspace(0.0, max(1e-9, float(mismatch_fracs.max())), 20)
-    if bins[-1] < 1.0:
-        bins = np.linspace(0.0, 1.0, 21)
-    for source_type in source_types:
-        values = [
-            row["mismatch_fraction"]
-            for row in rows
-            if row["source_type"] == source_type
-        ]
-        axes[1].hist(
-            values,
-            bins=bins,
-            alpha=0.65,
-            label=source_type,
-            color=color_by_source[source_type],
-            edgecolor="black",
+    if has_density:
+        artists = ax.violinplot(
+            [values],
+            positions=[position],
+            widths=width,
+            showmeans=False,
+            showmedians=True,
+            showextrema=True,
         )
-    axes[1].set_title("Mismatch Fraction Distribution")
-    axes[1].set_xlabel("Mismatching residue fraction")
-    axes[1].set_ylabel("Structures")
-    axes[1].legend(title="Type")
+        for body in artists["bodies"]:
+            body.set_facecolor(color)
+            body.set_edgecolor("black")
+            body.set_alpha(0.72)
+            body.set_linewidth(0.8)
+        for artist_name in ("cmins", "cmaxes", "cbars", "cmedians"):
+            artists[artist_name].set_color("black")
+            artists[artist_name].set_linewidth(1.0)
+    else:
+        ax.hlines(
+            float(values[0]),
+            position - width / 2,
+            position + width / 2,
+            color=color,
+            linewidth=4.0,
+            alpha=0.8,
+        )
 
-    fig.savefig(path, dpi=220)
-    plt.close(fig)
 
-
-def plot_rmsd_histograms(path: Path, rows: list[dict[str, Any]]) -> None:
-    reference_paths = {str(row["reference_pdb"]) for row in rows}
-    if len(reference_paths) != 1:
+def values_by_selection(
+    rows: list[dict[str, Any]],
+    value_key: str,
+    selection_keys: tuple[str, ...] = RMSD_SELECTION_KEYS,
+) -> dict[str, np.ndarray]:
+    values = {
+        selection_name: np.asarray(
+            [
+                row[value_key]
+                for row in rows
+                if row["selection_name"] == selection_name
+            ],
+            dtype=np.float64,
+        )
+        for selection_name in selection_keys
+    }
+    missing = [
+        selection_name
+        for selection_name, data in values.items()
+        if not data.size
+    ]
+    if missing:
         raise ValueError(
-            f"RMSD histogram rows use multiple fixed references: {sorted(reference_paths)}."
+            f"No {value_key!r} values available for selections: {missing}."
         )
-    reference_name = Path(next(iter(reference_paths))).name
-    values_by_selection = {
-        selection_name: np.asarray(
-            [row[f"rmsd_{selection_name}_angstrom"] for row in rows],
-            dtype=np.float64,
-        )
-        for selection_name in RMSD_SELECTION_KEYS
-    }
-    reference_values_by_selection = {
-        selection_name: np.asarray(
-            [row[f"reference_rmsd_{selection_name}_angstrom"] for row in rows],
-            dtype=np.float64,
-        )
-        for selection_name in RMSD_SELECTION_KEYS
-    }
-    if not np.isfinite(np.concatenate(list(values_by_selection.values()))).all():
-        raise ValueError("Cannot plot non-finite sampled-vs-target PDB RMSD values.")
-    if not np.isfinite(
-        np.concatenate(list(reference_values_by_selection.values()))
-    ).all():
-        raise ValueError("Cannot plot non-finite sampled-vs-reference PDB RMSD values.")
+    if not np.isfinite(np.concatenate(list(values.values()))).all():
+        raise ValueError(f"Cannot plot non-finite {value_key!r} values.")
+    return values
 
-    bin_count = max(5, min(20, int(np.ceil(np.sqrt(len(rows))))))
 
-    n_columns = 2
-    n_rows = int(np.ceil(len(RMSD_SELECTION_KEYS) / n_columns))
-    fig, axes = plt.subplots(
-        n_rows,
-        n_columns,
-        figsize=(14.0, 3.8 * n_rows),
-        constrained_layout=True,
+def set_selection_axis(
+    ax: Any,
+    positions: np.ndarray,
+    selection_keys: tuple[str, ...] = RMSD_SELECTION_KEYS,
+) -> None:
+    ax.set_xlabel("Selection type")
+    ax.set_xticks(positions)
+    ax.set_xticklabels(
+        [RMSD_SELECTION_PLOT_TITLES[name] for name in selection_keys],
+        rotation=12,
+        ha="right",
     )
-    axes_flat = np.asarray(axes).reshape(-1)
-    selection_colors = plt.get_cmap("Dark2")
-    for selection_idx, selection_name in enumerate(RMSD_SELECTION_KEYS):
-        ax = axes_flat[selection_idx]
-        values = values_by_selection[selection_name]
-        mean = float(np.mean(values))
-        median = float(np.median(values))
-        reference_mean = float(
-            np.mean(reference_values_by_selection[selection_name])
-        )
-        value_min = float(np.min(values))
-        value_max = float(np.max(values))
-        span = value_max - value_min
-        padding = max(0.005, 0.08 * max(span, 0.01))
-        bin_edges = np.linspace(
-            value_min - padding,
-            value_max + padding,
-            bin_count + 1,
-        )
-        ax.hist(
-            values,
-            bins=bin_edges,
-            color=selection_colors(selection_idx),
-            alpha=0.82,
-            edgecolor="black",
-            linewidth=0.7,
-        )
-        ax.axvline(mean, color="black", linestyle="--", linewidth=1.3, label=f"mean={mean:.3f}")
-        ax.axvline(
-            median,
-            color="black",
-            linestyle=":",
-            linewidth=1.3,
-            label=f"median={median:.3f}",
-        )
-        ax.set_title(
-            f"{RMSD_SELECTION_PLOT_TITLES[selection_name]} (n={values.size})\n"
-            f"average sampled vs {reference_name}: {reference_mean:.3f} Å"
-        )
-        ax.set_ylabel("Structures")
-        ax.grid(axis="y", alpha=0.2)
-        ax.legend(fontsize=8)
+    ax.grid(axis="y", alpha=0.2)
 
-    for unused_ax in axes_flat[len(RMSD_SELECTION_KEYS) :]:
-        unused_ax.remove()
-    for ax in axes_flat[: len(RMSD_SELECTION_KEYS)]:
-        ax.set_xlabel("Selection-fitted RMSD (Å)")
 
-    fig.suptitle(
-        "Sampled PDB vs Target PDB RMSD Distributions",
-        fontsize=15,
-    )
+def set_violin_y_limits(
+    ax: Any,
+    values_by_group: dict[str, np.ndarray],
+    threshold_fraction: float = VIOLIN_Y_AXIS_THRESHOLD_FRACTION,
+) -> None:
+    values = np.concatenate(list(values_by_group.values()))
+    value_min = float(np.min(values))
+    value_max = float(np.max(values))
+    value_range = value_max - value_min
+    if value_range > 0:
+        threshold = threshold_fraction * value_range
+    else:
+        threshold = threshold_fraction * max(abs(value_min), 1.0)
+    ax.set_ylim(value_min - threshold, value_max + threshold)
+
+
+def plot_summary(path: Path, selection_rows: list[dict[str, Any]]) -> None:
+    mismatch_percentages = {
+        selection_name: 100.0 * values
+        for selection_name, values in values_by_selection(
+            selection_rows,
+            "mismatch_fraction",
+            ERROR_SELECTION_KEYS,
+        ).items()
+    }
+    violin_positions = np.arange(1, len(ERROR_SELECTION_KEYS) + 1)
+    fig, ax = plt.subplots(figsize=(12.0, 6.0), constrained_layout=True)
+
+    for position, selection_name in zip(
+        violin_positions,
+        ERROR_SELECTION_KEYS,
+        strict=True,
+    ):
+        draw_violin(
+            ax,
+            mismatch_percentages[selection_name],
+            int(position),
+            RMSD_SELECTION_COLORS[selection_name],
+        )
+    ax.set_title("Conditioning vs Oracle Mismatch Percentages Across Sampled Structures")
+    ax.set_ylabel("Mismatching residues per structure (%)")
+    set_violin_y_limits(ax, mismatch_percentages)
+    set_selection_axis(ax, violin_positions, ERROR_SELECTION_KEYS)
+
     fig.savefig(path, dpi=220)
     plt.close(fig)
+
+
+def plot_rmsd_violins(path: Path, selection_rows: list[dict[str, Any]]) -> None:
+    rmsd_values = values_by_selection(selection_rows, "pdb_rmsd_angstrom")
+    violin_positions = np.arange(1, len(RMSD_SELECTION_KEYS) + 1)
+    fig, ax = plt.subplots(figsize=(12.0, 6.0), constrained_layout=True)
+
+    for position, selection_name in zip(
+        violin_positions,
+        RMSD_SELECTION_KEYS,
+        strict=True,
+    ):
+        draw_violin(
+            ax,
+            rmsd_values[selection_name],
+            int(position),
+            RMSD_SELECTION_COLORS[selection_name],
+        )
+    ax.set_title("Sampled PDB vs Target PDB RMSD Distributions")
+    ax.set_ylabel("Selection-fitted RMSD (Å)")
+    set_violin_y_limits(ax, rmsd_values)
+    set_selection_axis(ax, violin_positions)
+
+    fig.savefig(path, dpi=220)
+    plt.close(fig)
+
+
+# Backward-compatible callable name for code that imported the old plotter.
+plot_rmsd_histograms = plot_rmsd_violins
 
 
 def compare_file(
@@ -1678,6 +1713,7 @@ def main() -> None:
     selection_csv = out_dir / f"{prefix}_per_selection.csv"
     report_path = out_dir / f"{prefix}_report.txt"
     plot_path = out_dir / f"{prefix}_errors.png"
+    # Keep the historical filename so existing workflows can find the artifact.
     rmsd_plot_path = out_dir / f"{prefix}_rmsd_histograms.png"
 
     rows = sorted(rows, key=lambda row: (row["source_type"], row["sample_name"]))
@@ -1698,8 +1734,8 @@ def main() -> None:
     write_residue_csv(residue_csv, residue_rows)
     write_selection_csv(selection_csv, selection_rows)
     write_summary_report(report_path, rows, summary, selection_rows)
-    plot_summary(plot_path, rows)
-    plot_rmsd_histograms(rmsd_plot_path, rows)
+    plot_summary(plot_path, selection_rows)
+    plot_rmsd_violins(rmsd_plot_path, selection_rows)
 
     scope = "all residues" if args.all_res else VMD_SELECTION
     print(f"Processed {len(rows)} assigned cluster file(s) using: {scope}")
@@ -1708,7 +1744,7 @@ def main() -> None:
     print(f"Wrote per-selection CSV: {selection_csv}")
     print(f"Wrote report: {report_path}")
     print(f"Wrote error plot: {plot_path}")
-    print(f"Wrote RMSD histogram plot: {rmsd_plot_path}")
+    print(f"Wrote RMSD violin plot: {rmsd_plot_path}")
 
 
 if __name__ == "__main__":

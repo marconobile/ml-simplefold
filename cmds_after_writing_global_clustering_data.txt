@@ -173,3 +173,19 @@ that runs the above N times for active/inactive/pas
 then:
 python scripts/assign_conditioned_eval_sample_clusters.py --base-path /storage_common/nobilm/backmapping_pots_model/results_sampling_unseen_structures_v2/denovo_samples/sample_1
 python plot_evaluation.py --base_path /storage_common/nobilm/backmapping_pots_model/results_sampling_unseen_structures/denovo_samples/sample_1 --out_dir /storage_common/nobilm/backmapping_pots_model/results_sampling_unseen_structures/denovo_samples/sample_1
+
+
+
+###
+to add global clusters in non train input data:
+/home/nobilm@usi.ch/ml-simplefold/add_atom_idx_and_glob_cluster_id_per_frame_to_npz.py \
+--input-npz input_test_data_npz_without_global_clusters.npz
+--output-npz test_data_with_global_clusters.npz
+
+
+
+
+## to plot:
+python scripts/compare_conditioning_to_oracle.py     --base-path /storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue    --out-dir /storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue
+
+

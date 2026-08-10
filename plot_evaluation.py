@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import matplotlib
 
@@ -14,6 +15,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
+from matplotlib.ticker import PercentFormatter  # noqa: E402
 
 
 DEFAULT_REF_NPZ = Path(
@@ -56,7 +58,7 @@ SOURCE_LABELS = {
     "all_structures_samples": "all_structures",
 }
 MERGED_SOURCE = "all_structures"
-NEW_CATEGORY_ORDER = ("anecag", "theo", "inzma", "inactive")
+NEW_CATEGORY_ORDER = ("anecag", "inactive", "inzma", "theo")
 LEGACY_CATEGORY_ORDER = ("active", "inactive", "pas")
 CATEGORY_SCHEMAS = (NEW_CATEGORY_ORDER, LEGACY_CATEGORY_ORDER)
 SOURCE_COLORS = {
@@ -87,8 +89,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Find *_assigned_clusters.npz files, compare labels_assigned to "
-            "the conditioning labels saved with each sample, and plot one stacked "
-            "bar per structure: exact matches in green and differences in red. "
+            "the conditioning labels saved with each sample, and plot the "
+            "per-structure mismatch-fraction distributions as violin plots. "
             "A merged plot is always written. "
             "A categorized plot is also written when every category in a supported "
             "category set is present. Legacy samples without a companion "
@@ -118,7 +120,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output_name",
         default="assigned_cluster_match_histograms.png",
-        help="Merged output PNG filename.",
+        help=(
+            "Merged output PNG filename. The historical default filename is "
+            "retained for workflow compatibility, but the plot is a violin plot."
+        ),
     )
     parser.add_argument(
         "--category_output_name",
@@ -823,112 +828,146 @@ def count_label_matches(
     return exact_match_count, difference_count
 
 
-def save_stacked_match_plot(
+def draw_violin(
+    ax: Any,
+    values: np.ndarray,
+    position: int,
+    color: Any,
+    width: float = 0.78,
+) -> None:
+    """Draw a violin plus observations, with a safe fallback for constant data."""
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError("Violin data must be a non-empty one-dimensional array.")
+    if not np.isfinite(values).all():
+        raise ValueError("Cannot plot non-finite violin values.")
+
+    scale = max(1.0, float(np.max(np.abs(values))))
+    has_density = (
+        values.size >= 2
+        and float(np.ptp(values)) > np.finfo(np.float64).eps * scale
+    )
+    if has_density:
+        artists = ax.violinplot(
+            [values],
+            positions=[position],
+            widths=width,
+            showmeans=False,
+            showmedians=True,
+            showextrema=True,
+        )
+        for body in artists["bodies"]:
+            body.set_facecolor(color)
+            body.set_edgecolor("black")
+            body.set_alpha(0.72)
+            body.set_linewidth(0.8)
+        for artist_name in ("cmins", "cmaxes", "cbars", "cmedians"):
+            artists[artist_name].set_color("black")
+            artists[artist_name].set_linewidth(1.0)
+    else:
+        ax.hlines(
+            float(values[0]),
+            position - width / 2,
+            position + width / 2,
+            color=color,
+            linewidth=4.0,
+            alpha=0.8,
+        )
+
+    sorted_values = np.sort(values)
+    point_offsets = (
+        np.zeros(1)
+        if values.size == 1
+        else np.linspace(-0.13 * width, 0.13 * width, values.size)
+    )
+    ax.scatter(
+        position + point_offsets,
+        sorted_values,
+        s=15,
+        color=color,
+        edgecolor="black",
+        linewidth=0.35,
+        alpha=0.72,
+        zorder=3,
+    )
+    ax.scatter(
+        position,
+        float(np.mean(values)),
+        marker="D",
+        s=30,
+        color="black",
+        edgecolor="white",
+        linewidth=0.5,
+        zorder=4,
+    )
+
+
+def save_cluster_error_violin_plot(
     exact_matches_by_source: dict[str, list[int]],
     differences_by_source: dict[str, list[int]],
     source_order: tuple[str, ...],
     output_path: Path,
     title_suffix: str,
 ) -> None:
-    exact_matches = []
-    differences = []
-    sample_labels = []
-    category_boundaries = []
+    mismatch_fractions_by_source: dict[str, np.ndarray] = {}
     for source in source_order:
-        source_exact = exact_matches_by_source[source]
-        source_differences = differences_by_source[source]
+        source_exact = np.asarray(exact_matches_by_source[source], dtype=np.float64)
+        source_differences = np.asarray(
+            differences_by_source[source],
+            dtype=np.float64,
+        )
         if len(source_exact) != len(source_differences):
             raise ValueError(
                 f"Exact-match and difference counts have different lengths for "
                 f"{source!r}: {len(source_exact)} vs {len(source_differences)}."
             )
-        if exact_matches and source_exact:
-            category_boundaries.append(len(exact_matches) - 0.5)
-        exact_matches.extend(source_exact)
-        differences.extend(source_differences)
-        for sample_number in range(1, len(source_exact) + 1):
-            if len(source_order) == 1:
-                sample_labels.append(str(sample_number))
-            else:
-                source_label = SOURCE_DISPLAY_NAMES.get(source, source.upper())
-                sample_labels.append(f"{source_label}\n{sample_number}")
+        if source_exact.size == 0:
+            raise ValueError(f"Cannot create an empty violin for {source!r}.")
+        totals = source_exact + source_differences
+        if np.any(totals <= 0):
+            raise ValueError(
+                f"Every sample must compare at least one residue for {source!r}."
+            )
+        mismatch_fractions_by_source[source] = source_differences / totals
 
-    if not exact_matches or not differences:
-        raise ValueError(f"Cannot create an empty stacked plot: {output_path}")
-
-    exact_array = np.asarray(exact_matches, dtype=np.int64)
-    difference_array = np.asarray(differences, dtype=np.int64)
-    x_positions = np.arange(exact_array.size)
-    totals = exact_array + difference_array
-
-    fig_width = max(8, exact_array.size * 0.55)
+    x_positions = np.arange(1, len(source_order) + 1)
+    fig_width = max(8.0, 2.0 * len(source_order))
     fig, ax = plt.subplots(figsize=(fig_width, 6), constrained_layout=True)
-    ax.bar(
-        x_positions,
-        exact_array,
-        width=0.78,
-        color="#2ca02c",
-        edgecolor="black",
-        linewidth=0.8,
-        label="Exact matches",
-    )
-    ax.bar(
-        x_positions,
-        difference_array,
-        width=0.78,
-        bottom=exact_array,
-        color="#d62728",
-        edgecolor="black",
-        linewidth=0.8,
-        label="Differences",
-    )
+    for position, source in zip(x_positions, source_order, strict=True):
+        draw_violin(
+            ax,
+            mismatch_fractions_by_source[source],
+            int(position),
+            SOURCE_COLORS.get(source, "#7f7f7f"),
+        )
 
-    ax.set_title(f"Assigned-cluster label comparison — {title_suffix}")
-    ax.set_xlabel("Sample")
-    ax.set_ylabel("Residue count")
+    ax.set_title(f"Assigned-cluster mismatch distribution — {title_suffix}")
+    ax.set_xlabel("Sample type")
+    ax.set_ylabel("Mismatching residue fraction")
     ax.set_xticks(x_positions)
-    ax.set_xticklabels(sample_labels, rotation=90 if exact_array.size > 12 else 0)
-    ax.set_xlim(-0.6, exact_array.size - 0.4)
-    ax.set_ylim(0, max(1, int(totals.max())) * 1.08)
+    ax.set_xticklabels(
+        [
+            f"{SOURCE_DISPLAY_NAMES.get(source, source.upper())}\n"
+            f"(n={mismatch_fractions_by_source[source].size})"
+            for source in source_order
+        ]
+    )
+    ax.set_xlim(0.4, len(source_order) + 0.6)
+    max_mismatch_fraction = max(
+        float(np.max(values)) for values in mismatch_fractions_by_source.values()
+    )
+    mismatch_axis_max = min(1.0, max(0.05, 1.15 * max_mismatch_fraction))
+    ax.set_ylim(-0.02 * mismatch_axis_max, 1.02 * mismatch_axis_max)
+    ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
     ax.grid(axis="y", alpha=0.25)
-    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1), borderaxespad=0)
-
-    for boundary in category_boundaries:
-        ax.axvline(boundary, color="black", linewidth=0.8, alpha=0.45)
-
-    if exact_array.size <= 40:
-        for x_position, exact, difference in zip(
-            x_positions,
-            exact_array,
-            difference_array,
-            strict=True,
-        ):
-            if exact > 0:
-                ax.text(
-                    x_position,
-                    exact / 2,
-                    str(int(exact)),
-                    ha="center",
-                    va="center",
-                    color="white",
-                    fontsize=8,
-                    fontweight="bold",
-                )
-            if difference > 0:
-                ax.text(
-                    x_position,
-                    exact + difference / 2,
-                    str(int(difference)),
-                    ha="center",
-                    va="center",
-                    color="white",
-                    fontsize=8,
-                    fontweight="bold",
-                )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=300)
     plt.close(fig)
+
+
+# Backward-compatible callable name for code that imported the old plotter.
+save_stacked_match_plot = save_cluster_error_violin_plot
 
 
 def output_name_with_suffix(output_name: str, suffix_to_add: str) -> str:
@@ -1089,7 +1128,7 @@ def main() -> None:
 
     out_dir.mkdir(parents=True, exist_ok=True)
     merged_output_path = out_dir / args.output_name
-    save_stacked_match_plot(
+    save_cluster_error_violin_plot(
         {MERGED_SOURCE: merged_exact_matches},
         {MERGED_SOURCE: merged_differences},
         (MERGED_SOURCE,),
@@ -1101,7 +1140,7 @@ def main() -> None:
         "_vmd_selection",
     )
     vmd_output_path = out_dir / vmd_output_name
-    save_stacked_match_plot(
+    save_cluster_error_violin_plot(
         {MERGED_SOURCE: merged_vmd_exact_matches},
         {MERGED_SOURCE: merged_vmd_differences},
         (MERGED_SOURCE,),
@@ -1110,9 +1149,9 @@ def main() -> None:
     )
 
     print(f"Processed {len(sampled_structures)} file(s).")
-    print(f"Saved all-residue merged stacked plot to: {merged_output_path}")
+    print(f"Saved all-residue merged violin plot to: {merged_output_path}")
     print(
-        f"Saved strict-VMD-selection merged stacked plot ({len(VMD_RESIDS)} "
+        f"Saved strict-VMD-selection merged violin plot ({len(VMD_RESIDS)} "
         f"residues) to: {vmd_output_path}"
     )
 
@@ -1122,7 +1161,7 @@ def main() -> None:
             args.output_name,
             args.category_output_name,
         )
-        save_stacked_match_plot(
+        save_cluster_error_violin_plot(
             exact_matches_by_category,
             differences_by_category,
             category_schema,
@@ -1133,7 +1172,7 @@ def main() -> None:
             args.vmd_category_output_name
             or categorized_output_name(vmd_output_name, None)
         )
-        save_stacked_match_plot(
+        save_cluster_error_violin_plot(
             vmd_exact_matches_by_category,
             vmd_differences_by_category,
             category_schema,
@@ -1141,10 +1180,10 @@ def main() -> None:
             "By Category — Strict VMD Selection",
         )
         print(
-            f"Saved all-residue categorized stacked plot to: {category_output_path}"
+            f"Saved all-residue categorized violin plot to: {category_output_path}"
         )
         print(
-            "Saved strict-VMD-selection categorized stacked plot to: "
+            "Saved strict-VMD-selection categorized violin plot to: "
             f"{vmd_category_output_path}"
         )
     else:

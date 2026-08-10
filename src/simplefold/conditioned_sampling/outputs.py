@@ -403,6 +403,10 @@ def write_report(
     )
     if target_cif_path is not None:
         lines.append(f"  target_reference_cif: {target_cif_path}")
+    if metrics.get("target_reference_pdb_path") is not None:
+        lines.append(
+            f"  target_reference_pdb: {metrics['target_reference_pdb_path']}"
+        )
     if atom_csv_path is not None:
         lines.append(f"  atomwise_rmsd_csv: {atom_csv_path}")
     if sampled_pdb_path is not None:

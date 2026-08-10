@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -33,7 +34,10 @@ def resolve_conditioned_eval_converter_base_path(
         return configured_base_path
     return output_dir
 
-def run_conditioned_eval_cif_to_pdb_converter(base_path: Path) -> None:
+def run_conditioned_eval_cif_to_pdb_converter(
+    base_path: Path,
+    additional_cif_paths: Sequence[Path] = (),
+) -> None:
     converter_path = REPO_ROOT / "scripts" / "convert_conditioned_eval_cifs_to_pdb.py"
     command = [
         sys.executable,
@@ -41,6 +45,8 @@ def run_conditioned_eval_cif_to_pdb_converter(base_path: Path) -> None:
         "--base-path",
         str(base_path),
     ]
+    for cif_path in additional_cif_paths:
+        command.extend(("--additional-cif-path", str(cif_path)))
     print("Running CIF-to-PDB converter: " + " ".join(command))
     subprocess.run(command, check=True)
 
@@ -49,8 +55,11 @@ def ensure_conditioned_eval_sampled_pdb(
     configured_base_path: Path,
     output_dir: Path,
     current_file_only: bool = False,
+    additional_required_cif_paths: Sequence[Path] = (),
 ) -> Path:
     sampled_pdb_path = conditioned_eval_sampled_pdb_path(sampled_cif_path)
+    required_cif_paths = [sampled_cif_path, *additional_required_cif_paths]
+    required_pdb_paths = [cif_path.with_suffix(".pdb") for cif_path in required_cif_paths]
     converter_base_path = (
         sampled_cif_path
         if current_file_only
@@ -61,23 +70,37 @@ def ensure_conditioned_eval_sampled_pdb(
     )
 
     try:
-        run_conditioned_eval_cif_to_pdb_converter(converter_base_path)
+        run_conditioned_eval_cif_to_pdb_converter(
+            converter_base_path,
+            additional_cif_paths=additional_required_cif_paths,
+        )
     except subprocess.CalledProcessError:
         if converter_base_path == sampled_cif_path:
             raise
         print(
             "Warning: base-path conversion failed; retrying only the current "
-            f"sampled CIF: {sampled_cif_path}"
+            "sampled and required reference CIFs: "
+            f"{', '.join(str(path) for path in required_cif_paths)}"
         )
-        run_conditioned_eval_cif_to_pdb_converter(sampled_cif_path)
+        run_conditioned_eval_cif_to_pdb_converter(
+            sampled_cif_path,
+            additional_cif_paths=additional_required_cif_paths,
+        )
 
-    if not sampled_pdb_path.exists():
-        run_conditioned_eval_cif_to_pdb_converter(sampled_cif_path)
+    missing_pdb_paths = [path for path in required_pdb_paths if not path.is_file()]
+    if missing_pdb_paths:
+        missing_cif_paths = [path.with_suffix(".cif") for path in missing_pdb_paths]
+        run_conditioned_eval_cif_to_pdb_converter(
+            missing_cif_paths[0],
+            additional_cif_paths=missing_cif_paths[1:],
+        )
 
-    if not sampled_pdb_path.exists():
+    missing_pdb_paths = [path for path in required_pdb_paths if not path.is_file()]
+    if missing_pdb_paths:
+        missing_paths = "\n".join(f"  {path}" for path in missing_pdb_paths)
         raise FileNotFoundError(
-            "CIF-to-PDB conversion did not produce the expected sampled PDB: "
-            f"{sampled_pdb_path}"
+            "CIF-to-PDB conversion did not produce the required PDB file(s):\n"
+            f"{missing_paths}"
         )
     return sampled_pdb_path
 

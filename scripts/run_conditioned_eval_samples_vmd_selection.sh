@@ -6,7 +6,7 @@ set -euo pipefail
 #
 #   name CA and resid 2 to 30 35 to 65 69 to 104 113 to 138 169 to 209 215 to 255 261 to 287 288 to 300
 #
-# Every run also evaluates and plots sampled-PDB-vs-target-PDB RMSD histograms for the
+# Every run also evaluates and plots sampled-PDB-vs-target-PDB RMSD violins for the
 # strict VMD CA selection, all CA atoms, backbone atoms, protein non-backbone
 # atoms, and all atoms. Pass --all-res to use every residue for the primary
 # cluster-label comparison.
@@ -26,14 +26,14 @@ By default, conditioning-vs-oracle evaluation is restricted exactly to:
   name CA and resid 2 to 30 35 to 65 69 to 104 113 to 138 169 to 209 215 to 255 261 to 287 288 to 300
 
 Every run computes sampled-PDB-vs-target-PDB RMSD after an independent fit and
-writes a separate histogram for each of these selections:
+writes a separate violin subplot for each of these selections:
   1. The strict VMD CA/resid selection above
   2. All CA atoms
   3. Backbone atoms (N, CA, C, O)
   4. Protein and not backbone
   5. All ATOM/HETATM records
 
-Each histogram title also reports the average sampled-structure RMSD against:
+Each violin title also reports the average sampled-structure RMSD against:
   /home/nobilm@usi.ch/ml-simplefold/data/pdb_for_sampling_jupyter/INApo_no_caps.pdb
 
 Options:
@@ -53,10 +53,10 @@ done
 # check for changes
 DEVICE="${DEVICE:-cuda:3}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/checkpoints/last.ckpt}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue/anecag_4k}" # samples_cfg3_aip_selection_v2
+OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue/denovo_fix_symmetry_test_theo_no_stoc_DENOVOv2}"
 
 # fixed
-N="${N:--1}"
+N="${N:-1}"
 BASE_SEED="${BASE_SEED:-123}"
 CONDA_ENV="${CONDA_ENV:-simplefold}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -74,8 +74,8 @@ echo "LABELS_NPZ_PATH=${LABELS_NPZ_PATH}"
 # RAW_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/ANECAG_THEO_INZMA_INACTIVE_merged_with_globalclusters.npz"
 
 #! splitted data
-TYPE='anecag'
-RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/anecag_4000_noh_global_clusters.npz'
+# TYPE='anecag'
+# RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/anecag_4000_noh_global_clusters.npz'
 
 # TYPE='inactive'
 # RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/inactive_4000_noh_global_clusters.npz'
@@ -88,11 +88,12 @@ RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO
 
 # -----
 
-#! FOR DENOVO
+# # # ! FOR DENOVO
 # TYPE='denovo'
-#* here we can use directly:
+# # # #* here we can use directly:
 # RAW_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/ANECAG_THEO_INZMA_INACTIVE_merged_with_globalclusters.npz"
-# LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/sample.npz"
+# # LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/sample.npz"
+# LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/single_test.npz"
 
 # -----
 
@@ -121,7 +122,7 @@ cmd=(
     --output-dir "${TYPE_OUTPUT_DIR}"
     --device "${DEVICE}"
     --guidance-scale 3.0
-    # --tau 0.1
+    --tau 0.0
 )
 if [[ -n "${LABELS_NPZ_PATH}" ]]; then
     cmd+=(
@@ -130,7 +131,7 @@ if [[ -n "${LABELS_NPZ_PATH}" ]]; then
 fi
 "${cmd[@]}"
 
-echo "Assigning oracle clusters for TYPE=${TYPE}"
+echo "Assigning oracle clusters_conditioned_eval_target_reference.pdb for TYPE=${TYPE}"
 python scripts/assign_conditioned_eval_sample_clusters.py --base-path "${TYPE_OUTPUT_DIR}" #! assign with oracle 
 
 echo "Comparing original conditioning vs oracle labels for TYPE=${TYPE}"
@@ -139,5 +140,11 @@ python scripts/compare_conditioning_to_oracle.py \
     --out-dir "${TYPE_OUTPUT_DIR}" \
     "${comparison_scope_args[@]}"
 
-echo "Plotting assigned-cluster evaluation across all structure types"
-python plot_evaluation.py --base_path "${TYPE_OUTPUT_DIR}" --out_dir "${TYPE_OUTPUT_DIR}"
+echo "Comparing original conditioning vs oracle labels across all available structure types"
+python scripts/compare_conditioning_to_oracle.py \
+    --base-path "${OUTPUT_ROOT}" \
+    --out-dir "${OUTPUT_ROOT}" \
+    "${comparison_scope_args[@]}"
+
+echo "Plotting assigned-cluster evaluation across all available structure types"
+python plot_evaluation.py --base_path "${OUTPUT_ROOT}" --out_dir "${OUTPUT_ROOT}"
