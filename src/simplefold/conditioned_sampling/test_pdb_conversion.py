@@ -9,6 +9,20 @@ from simplefold.conditioned_sampling import pdb_conversion
 
 
 class TestEnsureConditionedEvalPdbs(unittest.TestCase):
+    def test_reads_residue_names_in_topology_order(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pdb_path = Path(tmp_dir) / "target.pdb"
+            pdb_path.write_text(
+                "ATOM      1  N   PHE A   1      10.000  11.000  12.000\n"
+                "ATOM      2  CA  PHE A   1      11.000  12.000  13.000\n"
+                "ATOM      3  N   VAL A   2      12.000  13.000  14.000\n"
+                "ATOM      4  CA  VAL A   2      13.000  14.000  15.000\n"
+            )
+
+            residue_names = pdb_conversion.read_pdb_residue_names(pdb_path)
+
+        self.assertEqual(residue_names.tolist(), ["PHE", "VAL"])
+
     def test_current_file_only_also_converts_and_requires_target_reference(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_dir = Path(tmp_dir)

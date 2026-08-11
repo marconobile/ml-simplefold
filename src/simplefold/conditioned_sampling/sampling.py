@@ -25,6 +25,7 @@ from .outputs import (
 )
 from .pdb_conversion import (
     ensure_conditioned_eval_sampled_pdb,
+    read_pdb_residue_names,
     validate_sampled_pdb_matches_coords,
 )
 
@@ -194,6 +195,7 @@ def sample_conditioned_structure(
     dihedral_diff_rad = None
     dihedral_abs_error_deg = None
     sampled_pdb_coords = None
+    residue_names = None
 
     output_stem = output_stem_for_sample(
         frame_data["record_id"],
@@ -263,6 +265,15 @@ def sample_conditioned_structure(
     )
     if target_cif_path is not None:
         target_pdb_path = target_cif_path.with_suffix(".pdb")
+        residue_names = read_pdb_residue_names(target_pdb_path)
+        if original_dihedrals is not None and residue_names.shape != (
+            original_dihedrals.shape[0],
+        ):
+            raise ValueError(
+                f"Target PDB contains {residue_names.shape[0]} residues, but the "
+                f"dihedral arrays contain {original_dihedrals.shape[0]}: "
+                f"{target_pdb_path}"
+            )
     sampled_coords_for_pdb_validation = (
         aligned_sampled_coords if evaluate_against_original else sampled_coords
     )
@@ -307,6 +318,7 @@ def sample_conditioned_structure(
             dihedral_diff_rad=dihedral_diff_rad,
             dihedral_mask=frame_data["dihedral_mask"],
             dihedral_keys=frame_data["dihedral_keys"],
+            residue_names=residue_names,
             angle_bins=args.dihedral_angle_bins,
             error_bins=args.dihedral_error_bins,
         )
@@ -397,6 +409,7 @@ def sample_conditioned_structure(
                 "dihedral_atom_indices": frame_data["dihedral_atom_indices"],
                 "dihedral_mask": frame_data["dihedral_mask"],
                 "dihedral_keys": np.asarray(frame_data["dihedral_keys"]),
+                "residue_names": residue_names,
             }
         )
     np.savez_compressed(arrays_path, **arrays)

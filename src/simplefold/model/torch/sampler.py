@@ -135,7 +135,7 @@ class EMSampler():
 
         score = flow.compute_score_from_velocity(velocity, y, t)
 
-        diff_coeff = self.diffusion_coefficient(t)
+        diff_coeff = self.diffusion_coefficient(t) # w(t)
         drift = velocity + diff_coeff * score
         mean_y = y + drift * dt
         y_sample = mean_y + torch.sqrt(2.0 * dt * diff_coeff * self.tau) * eps

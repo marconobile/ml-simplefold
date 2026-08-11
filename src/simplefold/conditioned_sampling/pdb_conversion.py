@@ -129,6 +129,40 @@ def read_pdb_atom_coordinates(path: Path) -> np.ndarray:
         raise ValueError(f"{path}: no ATOM/HETATM records found.")
     return np.asarray(coords, dtype=np.float32)
 
+
+def read_pdb_residue_names(path: Path) -> np.ndarray:
+    """Read residue names in their contiguous PDB topology order."""
+    residue_names: list[str] = []
+    seen_residues: set[tuple[str, str, str, str]] = set()
+    previous_identity: tuple[str, str, str, str] | None = None
+
+    with path.open() as handle:
+        for line_num, line in enumerate(handle, start=1):
+            if not line.startswith(PDB_ATOM_RECORDS):
+                continue
+            if len(line) < 27:
+                raise ValueError(f"{path}: malformed ATOM/HETATM line at {line_num}.")
+            residue_name = line[17:20].strip().upper()
+            identity = (
+                line[21].strip(),
+                line[22:26].strip(),
+                line[26].strip(),
+                residue_name,
+            )
+            if identity == previous_identity:
+                continue
+            if identity in seen_residues:
+                raise ValueError(
+                    f"{path}: residue {identity} is non-contiguous at line {line_num}."
+                )
+            seen_residues.add(identity)
+            residue_names.append(residue_name)
+            previous_identity = identity
+
+    if not residue_names:
+        raise ValueError(f"{path}: no ATOM/HETATM residues found.")
+    return np.asarray(residue_names, dtype=str)
+
 def load_sampled_pdb_dihedral_coords(
     sampled_pdb_path: Path,
     expected_shape: tuple[int, int],

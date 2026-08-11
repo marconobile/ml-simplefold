@@ -9,6 +9,8 @@ from typing import Any
 
 import numpy as np
 
+from .dihedrals import symmetry_correct_dihedral_errors
+
 
 def _histogram_counts(
     values: np.ndarray,
@@ -21,6 +23,93 @@ def _histogram_counts(
     counts, _ = np.histogram(values, bins=bins, range=value_range)
     return counts.astype(np.int64, copy=False), edges
 
+
+def write_dihedral_error_histogram_png(
+    output_path: Path,
+    dihedral_diff_rad: np.ndarray,
+    dihedral_mask: np.ndarray,
+    dihedral_keys: list[str],
+    residue_names: np.ndarray,
+    error_bins: int,
+    residue_selection_mask: np.ndarray | None = None,
+    figure_title: str | None = None,
+) -> Path:
+    """Plot symmetry-corrected dihedral errors for an optional residue subset."""
+    dihedral_diff_rad = np.asarray(dihedral_diff_rad)
+    dihedral_mask = np.asarray(dihedral_mask, dtype=bool)
+    if dihedral_mask.shape != dihedral_diff_rad.shape:
+        raise ValueError(
+            "Dihedral mask/difference shape mismatch: "
+            f"{dihedral_mask.shape} vs {dihedral_diff_rad.shape}."
+        )
+
+    valid = dihedral_mask & np.isfinite(dihedral_diff_rad)
+    if residue_selection_mask is not None:
+        residue_selection_mask = np.asarray(residue_selection_mask, dtype=bool)
+        if residue_selection_mask.shape != (dihedral_diff_rad.shape[0],):
+            raise ValueError(
+                "Residue selection mask must have shape "
+                f"{(dihedral_diff_rad.shape[0],)}, got {residue_selection_mask.shape}."
+            )
+        valid &= residue_selection_mask[:, None]
+
+    signed_error_deg, abs_error_deg = symmetry_correct_dihedral_errors(
+        dihedral_diff_rad,
+        residue_names,
+        dihedral_keys,
+    )
+
+    import matplotlib.pyplot as plt
+
+    row_labels = ["all", *dihedral_keys]
+    error_fig, error_axes = plt.subplots(
+        nrows=len(row_labels),
+        ncols=2,
+        figsize=(12.0, 2.6 * len(row_labels)),
+        constrained_layout=True,
+    )
+    if len(row_labels) == 1:
+        error_axes = np.asarray([error_axes])
+    for row_idx, label in enumerate(row_labels):
+        if label == "all":
+            row_valid = valid.reshape(-1)
+            signed_vals = signed_error_deg.reshape(-1)[row_valid]
+            abs_vals = abs_error_deg.reshape(-1)[row_valid]
+        else:
+            key_idx = dihedral_keys.index(label)
+            row_valid = valid[:, key_idx]
+            signed_vals = signed_error_deg[:, key_idx][row_valid]
+            abs_vals = abs_error_deg[:, key_idx][row_valid]
+        signed_ax = error_axes[row_idx, 0]
+        abs_ax = error_axes[row_idx, 1]
+        signed_ax.hist(
+            signed_vals,
+            bins=error_bins,
+            range=(-180.0, 180.0),
+            color="tab:orange",
+            alpha=0.8,
+        )
+        abs_ax.hist(
+            abs_vals,
+            bins=error_bins,
+            range=(0.0, 180.0),
+            color="tab:red",
+            alpha=0.8,
+        )
+        signed_ax.set_xlim(-180.0, 180.0)
+        abs_ax.set_xlim(0.0, 180.0)
+        signed_ax.set_ylabel("count")
+        signed_ax.set_title(f"{label} signed error (n={int(row_valid.sum())})")
+        abs_ax.set_title(f"{label} absolute error")
+    error_axes[-1, 0].set_xlabel("signed error (deg)")
+    error_axes[-1, 1].set_xlabel("absolute error (deg)")
+    if figure_title is not None:
+        error_fig.suptitle(figure_title)
+    error_fig.savefig(output_path, dpi=180)
+    plt.close(error_fig)
+    return output_path
+
+
 def write_dihedral_histograms(
     output_dir: Path,
     output_stem: str,
@@ -29,6 +118,7 @@ def write_dihedral_histograms(
     dihedral_diff_rad: np.ndarray,
     dihedral_mask: np.ndarray,
     dihedral_keys: list[str],
+    residue_names: np.ndarray,
     angle_bins: int,
     error_bins: int,
 ) -> dict[str, Any]:
@@ -41,8 +131,11 @@ def write_dihedral_histograms(
 
     original_deg = np.degrees(original_dihedrals)
     sampled_deg = np.degrees(sampled_dihedrals)
-    error_deg = np.degrees(dihedral_diff_rad)
-    abs_error_deg = np.abs(error_deg)
+    error_deg, abs_error_deg = symmetry_correct_dihedral_errors(
+        dihedral_diff_rad,
+        residue_names,
+        dihedral_keys,
+    )
 
     angle_csv_path = output_dir / f"{output_stem}_dihedral_angle_histograms.csv"
     error_csv_path = output_dir / f"{output_stem}_dihedral_error_histograms.csv"
@@ -161,42 +254,20 @@ def write_dihedral_histograms(
         plt.close(angle_fig)
         histogram_artifacts["angle_histogram_png"] = str(angle_png_path)
 
-        error_fig, error_axes = plt.subplots(
-            nrows=len(row_labels),
-            ncols=2,
-            figsize=(12.0, 2.6 * len(row_labels)),
-            constrained_layout=True,
+        write_dihedral_error_histogram_png(
+            output_path=error_png_path,
+            dihedral_diff_rad=dihedral_diff_rad,
+            dihedral_mask=valid,
+            dihedral_keys=dihedral_keys,
+            residue_names=residue_names,
+            error_bins=error_bins,
         )
-        if len(row_labels) == 1:
-            error_axes = np.asarray([error_axes])
-        for row_idx, label in enumerate(row_labels):
-            if label == "all":
-                row_valid = all_valid
-                signed_vals = all_err
-                abs_vals = all_abs_err
-            else:
-                key_idx = dihedral_keys.index(label)
-                row_valid = valid[:, key_idx]
-                signed_vals = error_deg[:, key_idx][row_valid]
-                abs_vals = abs_error_deg[:, key_idx][row_valid]
-            signed_ax = error_axes[row_idx, 0]
-            abs_ax = error_axes[row_idx, 1]
-            signed_ax.hist(signed_vals, bins=error_bins, range=(-180.0, 180.0), color="tab:orange", alpha=0.8)
-            abs_ax.hist(abs_vals, bins=error_bins, range=(0.0, 180.0), color="tab:red", alpha=0.8)
-            signed_ax.set_xlim(-180.0, 180.0)
-            abs_ax.set_xlim(0.0, 180.0)
-            signed_ax.set_ylabel("count")
-            signed_ax.set_title(f"{label} signed error (n={int(row_valid.sum())})")
-            abs_ax.set_title(f"{label} absolute error")
-        error_axes[-1, 0].set_xlabel("signed error (deg)")
-        error_axes[-1, 1].set_xlabel("absolute error (deg)")
-        error_fig.savefig(error_png_path, dpi=180)
-        plt.close(error_fig)
         histogram_artifacts["error_histogram_png"] = str(error_png_path)
     except Exception as exc:
         print(f"Warning: failed to render dihedral histogram PNG files: {exc}")
 
     return histogram_artifacts
+
 
 def write_atomwise_csv(
     path: Path,

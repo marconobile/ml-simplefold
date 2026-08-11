@@ -134,17 +134,24 @@ fi
 echo "Assigning oracle clusters_conditioned_eval_target_reference.pdb for TYPE=${TYPE}"
 python scripts/assign_conditioned_eval_sample_clusters.py --base-path "${TYPE_OUTPUT_DIR}" #! assign with oracle 
 
+if [[ -z "${LABELS_NPZ_PATH}" ]]; then
+    echo "Plotting dihedral errors for residues with wrong oracle clusters for TYPE=${TYPE}"
+    python scripts/plot_wrong_cluster_dihedral_errors.py --base-path "${TYPE_OUTPUT_DIR}"
+else
+    echo "Skipping mismatch-only dihedral errors: labels-NPZ samples have no target dihedrals"
+fi
+
 echo "Comparing original conditioning vs oracle labels for TYPE=${TYPE}"
 python scripts/compare_conditioning_to_oracle.py \
     --base-path "${TYPE_OUTPUT_DIR}" \
     --out-dir "${TYPE_OUTPUT_DIR}" \
     "${comparison_scope_args[@]}"
 
-echo "Comparing original conditioning vs oracle labels across all available structure types"
-python scripts/compare_conditioning_to_oracle.py \
-    --base-path "${OUTPUT_ROOT}" \
-    --out-dir "${OUTPUT_ROOT}" \
-    "${comparison_scope_args[@]}"
+# echo "Comparing original conditioning vs oracle labels across all available structure types"
+# python scripts/compare_conditioning_to_oracle.py \
+#     --base-path "${OUTPUT_ROOT}" \
+#     --out-dir "${OUTPUT_ROOT}" \
+#     "${comparison_scope_args[@]}"
 
 echo "Plotting assigned-cluster evaluation across all available structure types"
 python plot_evaluation.py --base_path "${OUTPUT_ROOT}" --out_dir "${OUTPUT_ROOT}"

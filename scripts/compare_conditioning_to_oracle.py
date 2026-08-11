@@ -83,11 +83,11 @@ RMSD_SELECTION_PLOT_TITLES = {
     "all_atoms": "All atoms",
 }
 RMSD_SELECTION_COLORS = {
-    "vmd_ca_residues": "#1b9e77",
-    "ca": "#d95f02",
-    "backbone": "#7570b3",
-    "protein_not_backbone": "#e7298a",
-    "all_atoms": "#66a61e",
+    "vmd_ca_residues": "#0072B2",
+    "ca": "#E69F00",
+    "backbone": "#009E73",
+    "protein_not_backbone": "#CC79A7",
+    "all_atoms": "#D55E00",
 }
 VIOLIN_Y_AXIS_THRESHOLD_FRACTION = 0.05
 
@@ -1396,7 +1396,7 @@ def draw_violin(
         for body in artists["bodies"]:
             body.set_facecolor(color)
             body.set_edgecolor("black")
-            body.set_alpha(0.72)
+            body.set_alpha(0.9)
             body.set_linewidth(0.8)
         for artist_name in ("cmins", "cmaxes", "cbars", "cmedians"):
             artists[artist_name].set_color("black")
@@ -1408,7 +1408,7 @@ def draw_violin(
             position + width / 2,
             color=color,
             linewidth=4.0,
-            alpha=0.8,
+            alpha=0.9,
         )
 
 

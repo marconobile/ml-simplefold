@@ -8,6 +8,61 @@ from typing import Any
 import numpy as np
 
 
+SYMMETRIC_SIDECHAIN_DIHEDRALS = {
+    "ASP": frozenset(("chi2",)),
+    "PHE": frozenset(("chi2",)),
+    "TYR": frozenset(("chi2",)),
+    "VAL": frozenset(("chi1",)),
+}
+
+
+def symmetry_correct_dihedral_errors(
+    dihedral_diff_rad: np.ndarray,
+    residue_names: np.ndarray,
+    dihedral_keys: list[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return signed/absolute degree errors with 180-degree symmetries applied."""
+    dihedral_diff_rad = np.asarray(dihedral_diff_rad)
+    residue_names = np.asarray(residue_names).astype(str)
+    if dihedral_diff_rad.ndim != 2:
+        raise ValueError(
+            "`dihedral_diff_rad` must have shape (n_residues, n_dihedrals), "
+            f"got {dihedral_diff_rad.shape}."
+        )
+    if residue_names.shape != (dihedral_diff_rad.shape[0],):
+        raise ValueError(
+            "`residue_names` must have one entry per residue, got "
+            f"{residue_names.shape} for dihedral shape {dihedral_diff_rad.shape}."
+        )
+    if len(dihedral_keys) != dihedral_diff_rad.shape[1]:
+        raise ValueError(
+            "`dihedral_keys` must have one entry per dihedral column, got "
+            f"{len(dihedral_keys)} for dihedral shape {dihedral_diff_rad.shape}."
+        )
+
+    signed_error_deg = np.degrees(dihedral_diff_rad).astype(np.float32, copy=False)
+    abs_error_deg = np.abs(signed_error_deg)
+    normalized_names = np.char.upper(np.char.strip(residue_names))
+
+    for residue_name, symmetric_keys in SYMMETRIC_SIDECHAIN_DIHEDRALS.items():
+        residue_mask = normalized_names == residue_name
+        if not np.any(residue_mask):
+            continue
+        for key in symmetric_keys:
+            if key not in dihedral_keys:
+                continue
+            key_idx = dihedral_keys.index(key)
+            raw_abs = np.clip(abs_error_deg[residue_mask, key_idx], 0.0, 180.0)
+            corrected_abs = np.minimum(raw_abs, 180.0 - raw_abs)
+            abs_error_deg[residue_mask, key_idx] = corrected_abs
+            signed_error_deg[residue_mask, key_idx] = np.copysign(
+                corrected_abs,
+                signed_error_deg[residue_mask, key_idx],
+            )
+
+    return signed_error_deg, abs_error_deg
+
+
 def compute_dihedral_angles(
     coords: np.ndarray,
     atom_indices: np.ndarray,
