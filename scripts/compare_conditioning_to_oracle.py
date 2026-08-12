@@ -1564,30 +1564,35 @@ def plot_rmsd_violins(path: Path, selection_rows: list[dict[str, Any]]) -> None:
     plt.close(fig)
 
 
-def plot_residue_accuracy_matrices(
+def plot_residue_confusion_matrices(
     path: Path,
-    accuracy_rows: list[dict[str, Any]],
+    confusion_rows: list[dict[str, Any]],
+    *,
+    selected_vmd_resids: frozenset[int] | None = None,
+    selection_title: str = "All residues",
 ) -> None:
-    if not accuracy_rows:
-        raise ValueError("Cannot plot residue accuracy matrices without residue rows.")
+    if not confusion_rows:
+        raise ValueError("Cannot plot residue confusion matrices without residue rows.")
 
     rows_by_residue: dict[int, list[dict[str, Any]]] = {}
-    for row in accuracy_rows:
+    for row in confusion_rows:
+        if int(row["cluster_count"]) <= 1:
+            continue
+        if (
+            selected_vmd_resids is not None
+            and int(row["vmd_resid"]) not in selected_vmd_resids
+        ):
+            continue
         rows_by_residue.setdefault(int(row["residue_index"]), []).append(row)
 
     residue_indices = sorted(rows_by_residue)
-    n_columns = int(np.ceil(np.sqrt(len(residue_indices))))
-    n_rows = int(np.ceil(len(residue_indices) / n_columns))
-    fig, axes = plt.subplots(
-        n_rows,
-        n_columns,
-        figsize=(2.3 * n_columns, 2.3 * n_rows),
-        squeeze=False,
-    )
-    axes_flat = axes.reshape(-1)
-    image = None
+    if not residue_indices:
+        raise ValueError(
+            f"No multi-cluster residues are available for {selection_title}."
+        )
 
-    for ax, residue_index in zip(axes_flat, residue_indices, strict=False):
+    matrices = []
+    for residue_index in residue_indices:
         residue_rows = rows_by_residue[residue_index]
         vmd_resids = {int(row["vmd_resid"]) for row in residue_rows}
         cluster_counts = {int(row["cluster_count"]) for row in residue_rows}
@@ -1599,89 +1604,94 @@ def plot_residue_accuracy_matrices(
             )
         vmd_resid = next(iter(vmd_resids))
         cluster_count = next(iter(cluster_counts))
-        if cluster_count <= 0:
-            raise ValueError(
-                f"Residue {vmd_resid} has invalid cluster count {cluster_count}."
-            )
 
         counts = np.zeros((cluster_count, cluster_count), dtype=np.int64)
         for row in residue_rows:
-            expected = int(row["expected_local_label"])
-            oracle = int(row["oracle_label"])
-            if expected < 0 or oracle < 0:
+            conditioning_cluster = int(row["expected_local_label"])
+            oracle_cluster = int(row["oracle_label"])
+            if conditioning_cluster < 0 or oracle_cluster < 0:
                 continue
-            if expected >= cluster_count or oracle >= cluster_count:
+            if (
+                conditioning_cluster >= cluster_count
+                or oracle_cluster >= cluster_count
+            ):
                 raise ValueError(
                     f"Cluster label outside 0..{cluster_count - 1} for residue "
-                    f"{vmd_resid}: conditioning={expected}, oracle={oracle}."
+                    f"{vmd_resid}: conditioning={conditioning_cluster}, "
+                    f"oracle={oracle_cluster}."
                 )
-            counts[expected, oracle] += 1
+            counts[conditioning_cluster, oracle_cluster] += 1
+        matrices.append((vmd_resid, counts))
 
-        row_totals = counts.sum(axis=1, keepdims=True)
-        percentages = np.divide(
-            100.0 * counts,
-            row_totals,
-            out=np.zeros_like(counts, dtype=np.float64),
-            where=row_totals > 0,
-        )
+    n_columns = int(np.ceil(np.sqrt(len(residue_indices))))
+    n_rows = int(np.ceil(len(residue_indices) / n_columns))
+    fig, axes = plt.subplots(
+        n_rows,
+        n_columns,
+        figsize=(max(10.0, 2.0 * n_columns), max(5.5, 2.0 * n_rows)),
+        squeeze=False,
+    )
+    axes_flat = axes.reshape(-1)
+    image = None
+    max_count = max(int(np.max(counts)) for _, counts in matrices)
+    color_max = max(max_count, 1)
+
+    for ax, (vmd_resid, counts) in zip(axes_flat, matrices, strict=False):
+        cluster_count = counts.shape[0]
         image = ax.imshow(
-            percentages,
+            counts,
             cmap="Blues",
             interpolation="nearest",
-            vmin=0.0,
-            vmax=100.0,
+            vmin=0,
+            vmax=color_max,
         )
-        comparable_count = int(counts.sum())
-        accuracy = (
-            100.0 * float(np.trace(counts)) / comparable_count
-            if comparable_count
-            else float("nan")
-        )
-        accuracy_text = f"{accuracy:.1f}%" if np.isfinite(accuracy) else "n/a"
-        ax.set_title(f"Residue {vmd_resid}\naccuracy={accuracy_text}", fontsize=8)
+        ax.set_title(f"Residue {vmd_resid}", fontsize=8)
         ticks = np.arange(cluster_count)
         ax.set_xticks(ticks)
         ax.set_yticks(ticks)
         ax.tick_params(labelsize=6, length=2)
-        ax.set_xlabel("Oracle cluster", fontsize=7)
-        ax.set_ylabel("Conditioning cluster", fontsize=7)
-        if cluster_count <= 8:
-            for expected in range(cluster_count):
-                for oracle in range(cluster_count):
-                    if counts[expected, oracle] == 0:
-                        continue
-                    percentage = percentages[expected, oracle]
-                    ax.text(
-                        oracle,
-                        expected,
-                        f"{percentage:.0f}%\n({counts[expected, oracle]})",
-                        ha="center",
-                        va="center",
-                        fontsize=5,
-                        color="white" if percentage >= 55.0 else "black",
-                    )
+        for conditioning_cluster in range(cluster_count):
+            for oracle_cluster in range(cluster_count):
+                count = int(counts[conditioning_cluster, oracle_cluster])
+                if count == 0:
+                    continue
+                ax.text(
+                    oracle_cluster,
+                    conditioning_cluster,
+                    str(count),
+                    ha="center",
+                    va="center",
+                    fontsize=6,
+                    color="white" if count >= 0.55 * color_max else "black",
+                )
 
     for unused_ax in axes_flat[len(residue_indices) :]:
         unused_ax.remove()
     if image is None:
-        raise ValueError("No residue accuracy matrix was rendered.")
+        raise ValueError("No residue confusion matrix was rendered.")
 
     fig.suptitle(
-        "Per-Residue Conditioning vs Oracle Accuracy Matrices\n"
-        "Cells show row-normalized percentage (count)",
+        "Per-Residue Conditioning vs Oracle Confusion Matrices\n"
+        f"{selection_title} · multi-cluster residues only",
         fontsize=14,
+        y=0.96,
     )
+    fig.supxlabel("Oracle cluster")
+    fig.supylabel("Conditioning cluster")
+    compact_layout = n_rows <= 2
     fig.subplots_adjust(
-        left=0.035,
-        right=0.95,
-        bottom=0.035,
-        top=0.94,
-        wspace=0.65,
-        hspace=0.85,
+        left=0.08 if compact_layout else 0.045,
+        right=0.9,
+        bottom=0.12 if compact_layout else 0.05,
+        top=0.82 if compact_layout else 0.94,
+        wspace=0.5,
+        hspace=0.65,
     )
-    colorbar_ax = fig.add_axes((0.965, 0.08, 0.012, 0.82))
+    colorbar_ax = fig.add_axes(
+        (0.925, 0.12, 0.012, 0.72 if compact_layout else 0.8)
+    )
     colorbar = fig.colorbar(image, cax=colorbar_ax)
-    colorbar.set_label("Row-normalized frequency (%)")
+    colorbar.set_label("Generated structures")
     fig.savefig(path, dpi=140)
     plt.close(fig)
 
@@ -2003,7 +2013,7 @@ def compare_file(
             }
         )
 
-    accuracy_rows = [
+    confusion_rows = [
         {
             "source_type": source_type,
             "sample_name": sample_name,
@@ -2024,7 +2034,7 @@ def compare_file(
         row,
         residue_rows,
         selection_rows,
-        accuracy_rows,
+        confusion_rows,
         mismatch_dihedral_data,
     )
 
@@ -2048,11 +2058,11 @@ def main() -> None:
     rows = []
     residue_rows = []
     selection_rows = []
-    accuracy_rows = []
+    confusion_rows = []
     mismatch_dihedral_data = []
     missing_dihedral_samples = []
     for assigned_path in assigned_files:
-        row, per_residue, per_selection, per_accuracy, per_dihedrals = compare_file(
+        row, per_residue, per_selection, per_confusion, per_dihedrals = compare_file(
             assigned_path,
             base_path,
             all_res=args.all_res,
@@ -2061,7 +2071,7 @@ def main() -> None:
         rows.append(row)
         residue_rows.extend(per_residue)
         selection_rows.extend(per_selection)
-        accuracy_rows.extend(per_accuracy)
+        confusion_rows.extend(per_confusion)
         if per_dihedrals is None:
             missing_dihedral_samples.append(row["sample_name"])
         else:
@@ -2074,8 +2084,11 @@ def main() -> None:
     selection_csv = out_dir / f"{prefix}_per_selection.csv"
     report_path = out_dir / f"{prefix}_report.txt"
     plot_path = out_dir / f"{prefix}_errors.png"
-    residue_accuracy_plot_path = (
-        out_dir / f"{prefix}_per_residue_accuracy_matrices.png"
+    residue_confusion_plot_path = (
+        out_dir / f"{prefix}_per_residue_confusion_matrices.png"
+    )
+    vmd_residue_confusion_plot_path = (
+        out_dir / f"{prefix}_vmd_selection_residue_confusion_matrices.png"
     )
     aggregate_dihedral_plot_path = (
         out_dir / f"{prefix}_wrong_cluster_dihedral_error_histograms.png"
@@ -2103,7 +2116,17 @@ def main() -> None:
     write_summary_report(report_path, rows, summary, selection_rows)
     plot_summary(plot_path, selection_rows)
     plot_rmsd_violins(rmsd_plot_path, selection_rows)
-    plot_residue_accuracy_matrices(residue_accuracy_plot_path, accuracy_rows)
+    plot_residue_confusion_matrices(
+        residue_confusion_plot_path,
+        confusion_rows,
+        selection_title="All residues",
+    )
+    plot_residue_confusion_matrices(
+        vmd_residue_confusion_plot_path,
+        confusion_rows,
+        selected_vmd_resids=frozenset(VMD_RESIDS),
+        selection_title="Strict VMD CA/residue selection",
+    )
     dihedral_plot_paths = write_mismatch_dihedral_plots(
         mismatch_dihedral_data,
         aggregate_dihedral_plot_path,
@@ -2118,7 +2141,11 @@ def main() -> None:
     print(f"Wrote report: {report_path}")
     print(f"Wrote error plot: {plot_path}")
     print(f"Wrote RMSD violin plot: {rmsd_plot_path}")
-    print(f"Wrote per-residue accuracy matrices: {residue_accuracy_plot_path}")
+    print(f"Wrote all-residue confusion matrices: {residue_confusion_plot_path}")
+    print(
+        "Wrote strict-VMD-selection confusion matrices: "
+        f"{vmd_residue_confusion_plot_path}"
+    )
     if dihedral_plot_paths:
         print(
             f"Wrote {len(dihedral_plot_paths) - 1} per-structure dihedral-error "

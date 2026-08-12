@@ -36,13 +36,64 @@ MISMATCH_METRICS = tuple(
 RMSD_METRICS = tuple(
     f"mean_rmsd_{selection}_angstrom" for selection in RMSD_SELECTIONS
 )
+PLOT_SPECS = (
+    (
+        "overall_score",
+        "Balanced decision score (0–100)\nhigher is better",
+        "RdYlGn",
+        "01_overall_score.png",
+    ),
+    (
+        "mean_mismatch_vmd_ca_residues_percent",
+        "Mean cluster mismatch: strict VMD (%)\nlower is better",
+        "RdYlGn_r",
+        "02_cluster_mismatch_strict_vmd.png",
+    ),
+    (
+        "mean_mismatch_all_atoms_percent",
+        "Mean cluster mismatch: all residues (%)\nlower is better",
+        "RdYlGn_r",
+        "03_cluster_mismatch_all_residues.png",
+    ),
+    (
+        "mean_rmsd_vmd_ca_residues_angstrom",
+        "Mean strict-VMD CA RMSD (Å)\nlower is better",
+        "RdYlGn_r",
+        "04_rmsd_strict_vmd_ca.png",
+    ),
+    (
+        "mean_rmsd_ca_angstrom",
+        "Mean all-CA RMSD (Å)\nlower is better",
+        "RdYlGn_r",
+        "05_rmsd_all_ca.png",
+    ),
+    (
+        "mean_rmsd_backbone_angstrom",
+        "Mean backbone RMSD (Å)\nlower is better",
+        "RdYlGn_r",
+        "06_rmsd_backbone.png",
+    ),
+    (
+        "mean_rmsd_protein_not_backbone_angstrom",
+        "Mean protein non-backbone RMSD (Å)\nlower is better",
+        "RdYlGn_r",
+        "07_rmsd_protein_non_backbone.png",
+    ),
+    (
+        "mean_rmsd_all_atoms_angstrom",
+        "Mean all-atom RMSD (Å)\nlower is better",
+        "RdYlGn_r",
+        "08_rmsd_all_atoms.png",
+    ),
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Read compare_conditioning_to_oracle.py CSVs listed in a sweep "
-            "manifest and write a parameter-level summary and decision report."
+            "manifest and write a parameter-level summary, combined decision "
+            "report, and one standalone PNG for each report panel."
         )
     )
     parser.add_argument(
@@ -55,18 +106,9 @@ def parse_args() -> argparse.Namespace:
         "--out-dir",
         type=Path,
         required=True,
-        help="Directory for the summary CSV and decision-report PNG.",
+        help="Directory for the summary CSV and combined/standalone report PNGs.",
     )
     return parser.parse_args()
-
-
-def parse_bool(value: str) -> bool:
-    normalized = value.strip().lower()
-    if normalized in {"true", "1", "yes"}:
-        return True
-    if normalized in {"false", "0", "no"}:
-        return False
-    raise ValueError(f"Invalid Boolean value in manifest: {value!r}")
 
 
 def required_float(row: dict[str, str], column: str, path: Path) -> float:
@@ -135,7 +177,6 @@ def summarize_parameter_set(
 ) -> tuple[dict[str, Any], tuple[tuple[int, int, int], ...]]:
     tau = float(manifest_row["tau"])
     guidance_scale = float(manifest_row["guidance_scale"])
-    is_extra = parse_bool(manifest_row["is_extra"])
     output_dir = Path(manifest_row["output_dir"]).expanduser().resolve()
     comparison_path = output_dir / COMPARISON_CSV
     selection_comparison_path = output_dir / SELECTION_COMPARISON_CSV
@@ -155,7 +196,6 @@ def summarize_parameter_set(
     summary: dict[str, Any] = {
         "tau": tau,
         "guidance_scale": guidance_scale,
-        "is_extra": is_extra,
         "sample_count": len(rows),
         "comparison_selection": next(iter(selections)),
         "output_dir": str(output_dir),
@@ -286,9 +326,8 @@ def metric_grid(
     metric: str,
     tau_values: list[float],
     guidance_values: list[float],
-) -> tuple[np.ndarray, np.ndarray]:
+) -> np.ndarray:
     grid = np.full((len(tau_values), len(guidance_values)), np.nan, dtype=np.float64)
-    extras = np.zeros(grid.shape, dtype=bool)
     tau_indices = {value: index for index, value in enumerate(tau_values)}
     guidance_indices = {value: index for index, value in enumerate(guidance_values)}
 
@@ -301,131 +340,85 @@ def metric_grid(
                 f"tau={summary['tau']}, guidance-scale={summary['guidance_scale']}"
             )
         grid[row, column] = float(summary[metric])
-        extras[row, column] = bool(summary["is_extra"])
-    return grid, extras
+    return grid
 
 
-def write_decision_report(path: Path, summaries: list[dict[str, Any]]) -> None:
-    tau_values = sorted({float(summary["tau"]) for summary in summaries})
-    guidance_values = sorted(
-        {float(summary["guidance_scale"]) for summary in summaries}
+def draw_metric_heatmap(
+    fig: Any,
+    axis: Any,
+    summaries: list[dict[str, Any]],
+    metric: str,
+    title: str,
+    color_map_name: str,
+    tau_values: list[float],
+    guidance_values: list[float],
+    annotation_fontsize: float = 8.0,
+) -> None:
+    grid = metric_grid(
+        summaries,
+        metric,
+        tau_values,
+        guidance_values,
     )
-    plot_specs = (
-        (
-            "overall_score",
-            "Balanced decision score (0–100)\nhigher is better",
-            "RdYlGn",
-        ),
-        (
-            "mean_mismatch_vmd_ca_residues_percent",
-            "Mean cluster mismatch: strict VMD (%)\nlower is better",
-            "RdYlGn_r",
-        ),
-        (
-            "mean_mismatch_all_atoms_percent",
-            "Mean cluster mismatch: all residues (%)\nlower is better",
-            "RdYlGn_r",
-        ),
-        (
-            "mean_rmsd_vmd_ca_residues_angstrom",
-            "Mean strict-VMD CA RMSD (Å)\nlower is better",
-            "RdYlGn_r",
-        ),
-        (
-            "mean_rmsd_ca_angstrom",
-            "Mean all-CA RMSD (Å)\nlower is better",
-            "RdYlGn_r",
-        ),
-        (
-            "mean_rmsd_backbone_angstrom",
-            "Mean backbone RMSD (Å)\nlower is better",
-            "RdYlGn_r",
-        ),
-        (
-            "mean_rmsd_protein_not_backbone_angstrom",
-            "Mean protein non-backbone RMSD (Å)\nlower is better",
-            "RdYlGn_r",
-        ),
-        (
-            "mean_rmsd_all_atoms_angstrom",
-            "Mean all-atom RMSD (Å)\nlower is better",
-            "RdYlGn_r",
-        ),
-    )
+    color_map = plt.get_cmap(color_map_name).copy()
+    color_map.set_bad("#dddddd")
+    image = axis.imshow(np.ma.masked_invalid(grid), cmap=color_map, aspect="auto")
+    axis.set_title(title)
+    axis.set_xlabel("Guidance scale")
+    axis.set_ylabel("Tau")
+    axis.set_xticks(range(len(guidance_values)))
+    axis.set_xticklabels([display_number(value) for value in guidance_values])
+    axis.set_yticks(range(len(tau_values)))
+    axis.set_yticklabels([display_number(value) for value in tau_values])
 
-    fig, axes = plt.subplots(3, 3, figsize=(18, 15), constrained_layout=True)
-    for axis, (metric, title, color_map_name) in zip(
-        axes.flat[: len(plot_specs)],
-        plot_specs,
-        strict=True,
-    ):
-        grid, extras = metric_grid(
-            summaries,
-            metric,
-            tau_values,
-            guidance_values,
-        )
-        color_map = plt.get_cmap(color_map_name).copy()
-        color_map.set_bad("#dddddd")
-        image = axis.imshow(np.ma.masked_invalid(grid), cmap=color_map, aspect="auto")
-        axis.set_title(title)
-        axis.set_xlabel("Guidance scale")
-        axis.set_ylabel("Tau")
-        axis.set_xticks(range(len(guidance_values)))
-        axis.set_xticklabels([display_number(value) for value in guidance_values])
-        axis.set_yticks(range(len(tau_values)))
-        axis.set_yticklabels([display_number(value) for value in tau_values])
-
-        for row in range(grid.shape[0]):
-            for column in range(grid.shape[1]):
-                value = grid[row, column]
-                if not np.isfinite(value):
-                    continue
-                suffix = "*" if extras[row, column] else ""
-                if metric == "overall_score":
-                    matching_summary = next(
-                        summary
-                        for summary in summaries
-                        if float(summary["tau"]) == tau_values[row]
-                        and float(summary["guidance_scale"])
-                        == guidance_values[column]
-                    )
-                    best_suffix = "\nBEST" if int(matching_summary["rank"]) == 1 else ""
-                    label = f"{value:.1f}{suffix}{best_suffix}"
-                else:
-                    label = f"{value:.2f}{suffix}"
-                axis.text(
-                    column,
-                    row,
-                    label,
-                    ha="center",
-                    va="center",
-                    fontsize=8,
-                    bbox={
-                        "boxstyle": "round,pad=0.16",
-                        "facecolor": "white",
-                        "edgecolor": "none",
-                        "alpha": 0.65,
-                    },
+    for row in range(grid.shape[0]):
+        for column in range(grid.shape[1]):
+            value = grid[row, column]
+            if not np.isfinite(value):
+                continue
+            if metric == "overall_score":
+                matching_summary = next(
+                    summary
+                    for summary in summaries
+                    if float(summary["tau"]) == tau_values[row]
+                    and float(summary["guidance_scale"])
+                    == guidance_values[column]
                 )
-        fig.colorbar(image, ax=axis, shrink=0.82)
+                best_suffix = "\nBEST" if int(matching_summary["rank"]) == 1 else ""
+                label = f"{value:.1f}{best_suffix}"
+            else:
+                label = f"{value:.2f}"
+            axis.text(
+                column,
+                row,
+                label,
+                ha="center",
+                va="center",
+                fontsize=annotation_fontsize,
+                bbox={
+                    "boxstyle": "round,pad=0.16",
+                    "facecolor": "white",
+                    "edgecolor": "none",
+                    "alpha": 0.65,
+                },
+            )
+    fig.colorbar(image, ax=axis, shrink=0.82)
 
-    ranking_axis = axes.flat[-1]
-    ranking_axis.axis("off")
+
+def ranking_panel_lines(summaries: list[dict[str, Any]]) -> list[str]:
     ranked = sorted(summaries, key=lambda summary: int(summary["rank"]))
-    ranking_lines = ["Top parameter combinations", ""]
+    lines = ["Top parameter combinations", ""]
     for summary in ranked[:5]:
-        extra_suffix = "*" if bool(summary["is_extra"]) else ""
-        ranking_lines.append(
+        lines.append(
             f"{int(summary['rank'])}. τ={display_number(float(summary['tau']))}, "
-            f"guidance={display_number(float(summary['guidance_scale']))}{extra_suffix}"
+            f"guidance={display_number(float(summary['guidance_scale']))}"
         )
-        ranking_lines.append(
+        lines.append(
             f"    overall={float(summary['overall_score']):.1f}  "
             f"clusters={float(summary['cluster_match_component_score']):.1f}  "
             f"RMSD={float(summary['rmsd_component_score']):.1f}"
         )
-    ranking_lines.extend(
+    lines.extend(
         [
             "",
             "Score construction",
@@ -436,37 +429,114 @@ def write_decision_report(path: Path, summaries: list[dict[str, Any]]) -> None:
             "• Each raw metric is min–max normalized",
             "  across the tested parameter combinations.",
             "• Lower raw mismatch and RMSD are better.",
-            "",
-            "* Additional control combination",
         ]
     )
+    return lines
+
+
+def draw_ranking_panel(
+    ranking_axis: Any,
+    summaries: list[dict[str, Any]],
+    fontsize: float = 11.0,
+) -> None:
+    ranking_axis.axis("off")
     ranking_axis.text(
         0.02,
         0.98,
-        "\n".join(ranking_lines),
+        "\n".join(ranking_panel_lines(summaries)),
         transform=ranking_axis.transAxes,
         ha="left",
         va="top",
-        fontsize=11,
+        fontsize=fontsize,
         linespacing=1.25,
     )
+
+
+def write_decision_report(path: Path, summaries: list[dict[str, Any]]) -> None:
+    tau_values = sorted({float(summary["tau"]) for summary in summaries})
+    guidance_values = sorted(
+        {float(summary["guidance_scale"]) for summary in summaries}
+    )
+    fig, axes = plt.subplots(3, 3, figsize=(18, 15), constrained_layout=True)
+    for axis, (metric, title, color_map_name, _) in zip(
+        axes.flat[: len(PLOT_SPECS)],
+        PLOT_SPECS,
+        strict=True,
+    ):
+        draw_metric_heatmap(
+            fig,
+            axis,
+            summaries,
+            metric,
+            title,
+            color_map_name,
+            tau_values,
+            guidance_values,
+        )
+
+    draw_ranking_panel(axes.flat[-1], summaries)
 
     sample_counts = sorted({int(summary["sample_count"]) for summary in summaries})
     count_text = ", ".join(str(count) for count in sample_counts)
     fig.suptitle(
         "Tau / guidance-scale sweep — conditioning fidelity and structural quality "
-        f"(sample counts per cell: {count_text}; * = extra control)",
+        f"(sample counts per cell: {count_text})",
         fontsize=15,
     )
     fig.savefig(path, dpi=220)
     plt.close(fig)
 
 
+def write_individual_report_panels(
+    output_dir: Path,
+    summaries: list[dict[str, Any]],
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    tau_values = sorted({float(summary["tau"]) for summary in summaries})
+    guidance_values = sorted(
+        {float(summary["guidance_scale"]) for summary in summaries}
+    )
+    output_paths = []
+    for metric, title, color_map_name, filename in PLOT_SPECS:
+        output_path = output_dir / filename
+        fig, axis = plt.subplots(figsize=(8.5, 6.5), constrained_layout=True)
+        draw_metric_heatmap(
+            fig,
+            axis,
+            summaries,
+            metric,
+            title,
+            color_map_name,
+            tau_values,
+            guidance_values,
+            annotation_fontsize=10.0,
+        )
+        fig.savefig(output_path, dpi=220)
+        plt.close(fig)
+        output_paths.append(output_path)
+
+    ranking_path = output_dir / "09_top_parameter_combinations.png"
+    fig, axis = plt.subplots(figsize=(8.5, 6.5), constrained_layout=True)
+    draw_ranking_panel(axis, summaries, fontsize=13.0)
+    fig.savefig(ranking_path, dpi=220)
+    plt.close(fig)
+    output_paths.append(ranking_path)
+    return output_paths
+
+
 def main() -> None:
     args = parse_args()
     manifest_path = args.manifest.expanduser().resolve()
     out_dir = args.out_dir.expanduser().resolve()
-    manifest_rows = load_manifest(manifest_path)
+    manifest_rows = [
+        row
+        for row in load_manifest(manifest_path)
+        if float(row["tau"]) != 0.0
+    ]
+    if not manifest_rows:
+        raise ValueError(
+            f"Sweep manifest contains no nonzero-tau parameter sets: {manifest_path}"
+        )
 
     summaries = []
     reference_signature = None
@@ -489,8 +559,10 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     summary_path = out_dir / "tau_guidance_sweep_summary.csv"
     report_path = out_dir / "tau_guidance_sweep_report.png"
+    panel_dir = out_dir / "tau_guidance_sweep_report_panels"
     write_summary_csv(summary_path, summaries)
     write_decision_report(report_path, summaries)
+    panel_paths = write_individual_report_panels(panel_dir, summaries)
 
     print(
         f"Verified paired sample indices, seeds, and frames across "
@@ -505,6 +577,7 @@ def main() -> None:
         f"score={float(best['overall_score']):.2f}"
     )
     print(f"Wrote sweep decision report: {report_path}")
+    print(f"Wrote {len(panel_paths)} standalone report panels under: {panel_dir}")
 
 
 if __name__ == "__main__":

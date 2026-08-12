@@ -6,23 +6,18 @@ usage() {
 Usage: bash scripts/run_conditioned_eval_tau_guidance_sweep.sh [options]
 
 Run 100 all-structures samples for every pair in this grid:
-  tau:            0.1, 0.3, 0.5, 0.7, 0.9
-  guidance-scale: 2, 3, 5, 8, 12
-
-By default, two useful controls are also run:
-  tau=0.0, guidance-scale=3  (setting used by the source workflow)
-  tau=0.3, guidance-scale=1  (sampler default; no extra unconditional pass)
+  tau:            0.01, 0.1, 0.3, 0.5, 0.7, 0.9
+  guidance-scale: 1, 2, 3, 5, 8, 12
 
 Each parameter set gets its own sampling, oracle assignment, comparison, and
 plot_evaluation outputs. A summary CSV and decision report are written at the
-sweep root.
+sweep root, with every decision-report cell also exported as a standalone PNG.
 The same base seed is used for every parameter set, so target frames and sample
 seeds are paired across the sweep.
 
 Options:
   --analysis-only       Re-run comparisons, plots, and the sweep summary using
                         samples and oracle assignments that already exist.
-  --requested-grid-only Skip the two additional control combinations.
   --dry-run             Print commands without executing them.
   -h, --help            Show this help message.
 
@@ -35,16 +30,11 @@ EOF
 }
 
 ANALYSIS_ONLY=false
-INCLUDE_EXTRA_COMBINATIONS=true
 DRY_RUN=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --analysis-only)
             ANALYSIS_ONLY=true
-            shift
-            ;;
-        --requested-grid-only)
-            INCLUDE_EXTRA_COMBINATIONS=false
             shift
             ;;
         --dry-run)
@@ -75,12 +65,8 @@ readonly TYPE="all_structures"
 readonly RAW_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/ANECAG_THEO_INZMA_INACTIVE_merged_with_globalclusters.npz"
 readonly N=100
 
-TAU_VALUES=(0.1 0.3 0.5 0.7 0.9)
-GUIDANCE_SCALE_VALUES=(2 3 5 8 12)
-EXTRA_COMBINATIONS=(
-    "0.0 3"
-    "0.3 1"
-)
+TAU_VALUES=(0.01 0.1 0.3 0.5 0.7 0.9)
+GUIDANCE_SCALE_VALUES=(1 2 3 5 8 12)
 
 run_command() {
     printf ' +'
@@ -136,13 +122,12 @@ fi
 
 MANIFEST_PATH="${OUTPUT_ROOT}/tau_guidance_sweep_manifest.tsv"
 if [[ "${DRY_RUN}" == false ]]; then
-    printf 'tau\tguidance_scale\tis_extra\toutput_dir\n' > "${MANIFEST_PATH}"
+    printf 'tau\tguidance_scale\toutput_dir\n' > "${MANIFEST_PATH}"
 fi
 
 run_parameter_set() {
     local tau="$1"
     local guidance_scale="$2"
-    local is_extra="$3"
     local tau_slug
     local guidance_slug
     local parameter_dir
@@ -160,8 +145,8 @@ run_parameter_set() {
 
     if [[ "${DRY_RUN}" == false ]]; then
         mkdir -p "${type_output_dir}"
-        printf '%s\t%s\t%s\t%s\n' \
-            "${tau}" "${guidance_scale}" "${is_extra}" "${type_output_dir}" \
+        printf '%s\t%s\t%s\n' \
+            "${tau}" "${guidance_scale}" "${type_output_dir}" \
             >> "${MANIFEST_PATH}"
     fi
 
@@ -222,16 +207,9 @@ run_parameter_set() {
 
 for tau in "${TAU_VALUES[@]}"; do
     for guidance_scale in "${GUIDANCE_SCALE_VALUES[@]}"; do
-        run_parameter_set "${tau}" "${guidance_scale}" false
+        run_parameter_set "${tau}" "${guidance_scale}"
     done
 done
-
-if [[ "${INCLUDE_EXTRA_COMBINATIONS}" == true ]]; then
-    for combination in "${EXTRA_COMBINATIONS[@]}"; do
-        read -r tau guidance_scale <<< "${combination}"
-        run_parameter_set "${tau}" "${guidance_scale}" true
-    done
-fi
 
 if [[ "${DRY_RUN}" == false ]]; then
     run_command \
@@ -243,6 +221,7 @@ if [[ "${DRY_RUN}" == false ]]; then
     echo "Sweep complete."
     echo "Summary CSV: ${OUTPUT_ROOT}/tau_guidance_sweep_summary.csv"
     echo "Decision report: ${OUTPUT_ROOT}/tau_guidance_sweep_report.png"
+    echo "Standalone report panels: ${OUTPUT_ROOT}/tau_guidance_sweep_report_panels"
 else
     echo
     echo "Dry run complete."
