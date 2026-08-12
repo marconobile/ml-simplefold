@@ -53,10 +53,10 @@ done
 # check for changes
 DEVICE="${DEVICE:-cuda:3}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/checkpoints/last.ckpt}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue/denovo_fix_symmetry_test_theo_no_stoc_DENOVOv2}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue/postswipe_theo_onlyN200}"
 
 # fixed
-N="${N:-1}"
+N="${N:-200}"
 BASE_SEED="${BASE_SEED:-123}"
 CONDA_ENV="${CONDA_ENV:-simplefold}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -83,8 +83,8 @@ echo "LABELS_NPZ_PATH=${LABELS_NPZ_PATH}"
 # TYPE='inzma'
 # RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/inzma_4000_noh_global_clusters.npz'
 
-# TYPE='theo'
-# RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/theo_4000_noh_global_clusters.npz'
+TYPE='theo'
+RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/theo_4000_noh_global_clusters.npz'
 
 # -----
 
@@ -121,8 +121,8 @@ cmd=(
     --raw-npz-path "${RAW_NPZ_PATH}"
     --output-dir "${TYPE_OUTPUT_DIR}"
     --device "${DEVICE}"
-    --guidance-scale 3.0
-    --tau 0.0
+    --guidance-scale 1.0
+    --tau 0.3
 )
 if [[ -n "${LABELS_NPZ_PATH}" ]]; then
     cmd+=(

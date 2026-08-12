@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare conditioning labels and selection-fitted sampled-vs-target PDB RMSDs."""
+"""Compare conditioning labels, RMSDs, and mismatch-associated dihedral errors."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,16 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from simplefold.conditioned_sampling.outputs import (  # noqa: E402
+    write_dihedral_error_histogram_png,
+)
 
 
 ASSIGNED_TOKEN = "_assigned_clusters.npz"
@@ -90,6 +101,9 @@ RMSD_SELECTION_COLORS = {
     "all_atoms": "#D55E00",
 }
 VIOLIN_Y_AXIS_THRESHOLD_FRACTION = 0.05
+WRONG_CLUSTER_DIHEDRAL_PLOT_TOKEN = (
+    "_conditioned_eval_wrong_cluster_dihedral_error_histograms.png"
+)
 
 
 @dataclass(frozen=True)
@@ -126,13 +140,26 @@ class PdbAtom:
         )
 
 
+@dataclass(frozen=True)
+class MismatchDihedralData:
+    sample_name: str
+    output_path: Path
+    dihedral_diff_rad: np.ndarray
+    dihedral_mask: np.ndarray
+    dihedral_keys: tuple[str, ...]
+    residue_names: np.ndarray
+    mismatch_count: int
+    comparable_count: int
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Compare the conditioning vector saved by sample_with_conditioning.py "
             "against oracle labels written by assign_conditioned_eval_sample_clusters.py, "
             "and calculate strictly paired sampled-PDB-vs-target-PDB RMSDs for five "
-            "atom selections."
+            "atom selections, per-residue cluster accuracy matrices, and "
+            "mismatch-associated dihedral-error distributions."
         )
     )
     parser.add_argument(
@@ -176,6 +203,13 @@ def parse_args() -> argparse.Namespace:
             f"default, use the VMD selection {VMD_SELECTION!r}. All five PDB "
             "RMSD atom selections are always evaluated."
         ),
+    )
+    parser.add_argument(
+        "--dihedral-error-bins",
+        "--dihedral_error_bins",
+        type=int,
+        default=72,
+        help="Histogram bins for mismatch-only dihedral-error plots. Defaults to 72.",
     )
     return parser.parse_args()
 
@@ -1530,8 +1564,293 @@ def plot_rmsd_violins(path: Path, selection_rows: list[dict[str, Any]]) -> None:
     plt.close(fig)
 
 
+def plot_residue_accuracy_matrices(
+    path: Path,
+    accuracy_rows: list[dict[str, Any]],
+) -> None:
+    if not accuracy_rows:
+        raise ValueError("Cannot plot residue accuracy matrices without residue rows.")
+
+    rows_by_residue: dict[int, list[dict[str, Any]]] = {}
+    for row in accuracy_rows:
+        rows_by_residue.setdefault(int(row["residue_index"]), []).append(row)
+
+    residue_indices = sorted(rows_by_residue)
+    n_columns = int(np.ceil(np.sqrt(len(residue_indices))))
+    n_rows = int(np.ceil(len(residue_indices) / n_columns))
+    fig, axes = plt.subplots(
+        n_rows,
+        n_columns,
+        figsize=(2.3 * n_columns, 2.3 * n_rows),
+        squeeze=False,
+    )
+    axes_flat = axes.reshape(-1)
+    image = None
+
+    for ax, residue_index in zip(axes_flat, residue_indices, strict=False):
+        residue_rows = rows_by_residue[residue_index]
+        vmd_resids = {int(row["vmd_resid"]) for row in residue_rows}
+        cluster_counts = {int(row["cluster_count"]) for row in residue_rows}
+        if len(vmd_resids) != 1 or len(cluster_counts) != 1:
+            raise ValueError(
+                f"Inconsistent metadata for residue index {residue_index}: "
+                f"vmd_resids={sorted(vmd_resids)}, "
+                f"cluster_counts={sorted(cluster_counts)}."
+            )
+        vmd_resid = next(iter(vmd_resids))
+        cluster_count = next(iter(cluster_counts))
+        if cluster_count <= 0:
+            raise ValueError(
+                f"Residue {vmd_resid} has invalid cluster count {cluster_count}."
+            )
+
+        counts = np.zeros((cluster_count, cluster_count), dtype=np.int64)
+        for row in residue_rows:
+            expected = int(row["expected_local_label"])
+            oracle = int(row["oracle_label"])
+            if expected < 0 or oracle < 0:
+                continue
+            if expected >= cluster_count or oracle >= cluster_count:
+                raise ValueError(
+                    f"Cluster label outside 0..{cluster_count - 1} for residue "
+                    f"{vmd_resid}: conditioning={expected}, oracle={oracle}."
+                )
+            counts[expected, oracle] += 1
+
+        row_totals = counts.sum(axis=1, keepdims=True)
+        percentages = np.divide(
+            100.0 * counts,
+            row_totals,
+            out=np.zeros_like(counts, dtype=np.float64),
+            where=row_totals > 0,
+        )
+        image = ax.imshow(
+            percentages,
+            cmap="Blues",
+            interpolation="nearest",
+            vmin=0.0,
+            vmax=100.0,
+        )
+        comparable_count = int(counts.sum())
+        accuracy = (
+            100.0 * float(np.trace(counts)) / comparable_count
+            if comparable_count
+            else float("nan")
+        )
+        accuracy_text = f"{accuracy:.1f}%" if np.isfinite(accuracy) else "n/a"
+        ax.set_title(f"Residue {vmd_resid}\naccuracy={accuracy_text}", fontsize=8)
+        ticks = np.arange(cluster_count)
+        ax.set_xticks(ticks)
+        ax.set_yticks(ticks)
+        ax.tick_params(labelsize=6, length=2)
+        ax.set_xlabel("Oracle cluster", fontsize=7)
+        ax.set_ylabel("Conditioning cluster", fontsize=7)
+        if cluster_count <= 8:
+            for expected in range(cluster_count):
+                for oracle in range(cluster_count):
+                    if counts[expected, oracle] == 0:
+                        continue
+                    percentage = percentages[expected, oracle]
+                    ax.text(
+                        oracle,
+                        expected,
+                        f"{percentage:.0f}%\n({counts[expected, oracle]})",
+                        ha="center",
+                        va="center",
+                        fontsize=5,
+                        color="white" if percentage >= 55.0 else "black",
+                    )
+
+    for unused_ax in axes_flat[len(residue_indices) :]:
+        unused_ax.remove()
+    if image is None:
+        raise ValueError("No residue accuracy matrix was rendered.")
+
+    fig.suptitle(
+        "Per-Residue Conditioning vs Oracle Accuracy Matrices\n"
+        "Cells show row-normalized percentage (count)",
+        fontsize=14,
+    )
+    fig.subplots_adjust(
+        left=0.035,
+        right=0.95,
+        bottom=0.035,
+        top=0.94,
+        wspace=0.65,
+        hspace=0.85,
+    )
+    colorbar_ax = fig.add_axes((0.965, 0.08, 0.012, 0.82))
+    colorbar = fig.colorbar(image, cax=colorbar_ax)
+    colorbar.set_label("Row-normalized frequency (%)")
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+
+
 # Backward-compatible callable name for code that imported the old plotter.
 plot_rmsd_histograms = plot_rmsd_violins
+
+
+def pdb_residue_names(path: Path) -> np.ndarray:
+    names = []
+    previous_identity = None
+    for atom in read_pdb_atoms(path):
+        if atom.residue_identity != previous_identity:
+            names.append(atom.residue_name)
+            previous_identity = atom.residue_identity
+    return np.asarray(names, dtype=str)
+
+
+def load_mismatch_dihedral_data(
+    *,
+    conditioned_eval_path: Path,
+    target_pdb_path: Path,
+    sample_name: str,
+    expected_local: np.ndarray,
+    oracle_labels: np.ndarray,
+) -> MismatchDihedralData | None:
+    arrays = {
+        key: optional_npz_array(conditioned_eval_path, key)
+        for key in ("dihedral_diff_rad", "dihedral_mask", "dihedral_keys")
+    }
+    if all(value is None for value in arrays.values()):
+        return None
+    missing = [key for key, value in arrays.items() if value is None]
+    if missing:
+        raise KeyError(
+            f"{conditioned_eval_path} has incomplete dihedral data; missing {missing}."
+        )
+
+    dihedral_diff_rad = np.asarray(arrays["dihedral_diff_rad"], dtype=np.float64)
+    dihedral_mask = np.asarray(arrays["dihedral_mask"], dtype=bool)
+    raw_dihedral_keys = one_dimensional(
+        np.asarray(arrays["dihedral_keys"]),
+        "dihedral_keys",
+        conditioned_eval_path,
+    )
+    dihedral_keys = tuple(text_value(key) for key in raw_dihedral_keys)
+    if dihedral_diff_rad.ndim != 2 or dihedral_mask.shape != dihedral_diff_rad.shape:
+        raise ValueError(
+            f"Invalid dihedral shapes in {conditioned_eval_path}: "
+            f"differences={dihedral_diff_rad.shape}, mask={dihedral_mask.shape}."
+        )
+    if len(dihedral_keys) != dihedral_diff_rad.shape[1]:
+        raise ValueError(
+            f"{conditioned_eval_path} has {len(dihedral_keys)} dihedral keys for "
+            f"{dihedral_diff_rad.shape[1]} dihedral columns."
+        )
+    if expected_local.shape != (dihedral_diff_rad.shape[0],):
+        raise ValueError(
+            f"Residue/dihedral shape mismatch for {conditioned_eval_path}: "
+            f"labels={expected_local.shape}, dihedrals={dihedral_diff_rad.shape}."
+        )
+
+    stored_residue_names = optional_npz_array(conditioned_eval_path, "residue_names")
+    if stored_residue_names is None:
+        residue_names = pdb_residue_names(target_pdb_path)
+    else:
+        residue_names = np.asarray(
+            [
+                text_value(name)
+                for name in one_dimensional(
+                    stored_residue_names,
+                    "residue_names",
+                    conditioned_eval_path,
+                )
+            ],
+            dtype=str,
+        )
+    if residue_names.shape != expected_local.shape:
+        raise ValueError(
+            f"Residue-name shape mismatch for {conditioned_eval_path}: "
+            f"{residue_names.shape} vs {expected_local.shape}."
+        )
+
+    comparable = (expected_local >= 0) & (oracle_labels >= 0)
+    mismatches = comparable & (expected_local != oracle_labels)
+    output_path = conditioned_eval_path.with_name(
+        conditioned_eval_path.name.replace(
+            CONDITIONED_EVAL_TOKEN,
+            WRONG_CLUSTER_DIHEDRAL_PLOT_TOKEN,
+            1,
+        )
+    )
+    return MismatchDihedralData(
+        sample_name=sample_name,
+        output_path=output_path,
+        dihedral_diff_rad=dihedral_diff_rad[mismatches],
+        dihedral_mask=dihedral_mask[mismatches],
+        dihedral_keys=dihedral_keys,
+        residue_names=residue_names[mismatches],
+        mismatch_count=int(mismatches.sum()),
+        comparable_count=int(comparable.sum()),
+    )
+
+
+def write_mismatch_dihedral_plots(
+    data_by_sample: list[MismatchDihedralData],
+    aggregate_path: Path,
+    error_bins: int,
+) -> list[Path]:
+    if not data_by_sample:
+        return []
+
+    expected_keys = data_by_sample[0].dihedral_keys
+    inconsistent = [
+        data.sample_name
+        for data in data_by_sample
+        if data.dihedral_keys != expected_keys
+    ]
+    if inconsistent:
+        raise ValueError(
+            "Cannot aggregate mismatch dihedrals with inconsistent dihedral keys; "
+            f"samples={inconsistent}."
+        )
+
+    written_paths = []
+    for data in data_by_sample:
+        write_dihedral_error_histogram_png(
+            output_path=data.output_path,
+            dihedral_diff_rad=data.dihedral_diff_rad,
+            dihedral_mask=data.dihedral_mask,
+            dihedral_keys=list(data.dihedral_keys),
+            residue_names=data.residue_names,
+            error_bins=error_bins,
+            figure_title=(
+                f"{data.sample_name}: dihedral errors at cluster mismatches "
+                f"({data.mismatch_count}/{data.comparable_count} residues)"
+            ),
+        )
+        written_paths.append(data.output_path)
+
+    aggregate_diff = np.concatenate(
+        [data.dihedral_diff_rad for data in data_by_sample],
+        axis=0,
+    )
+    aggregate_mask = np.concatenate(
+        [data.dihedral_mask for data in data_by_sample],
+        axis=0,
+    )
+    aggregate_residue_names = np.concatenate(
+        [data.residue_names for data in data_by_sample],
+        axis=0,
+    )
+    total_mismatches = sum(data.mismatch_count for data in data_by_sample)
+    total_comparable = sum(data.comparable_count for data in data_by_sample)
+    write_dihedral_error_histogram_png(
+        output_path=aggregate_path,
+        dihedral_diff_rad=aggregate_diff,
+        dihedral_mask=aggregate_mask,
+        dihedral_keys=list(expected_keys),
+        residue_names=aggregate_residue_names,
+        error_bins=error_bins,
+        figure_title=(
+            "Dihedral errors at cluster mismatches across "
+            f"{len(data_by_sample)} generated structures "
+            f"({total_mismatches}/{total_comparable} residue events)"
+        ),
+    )
+    written_paths.append(aggregate_path)
+    return written_paths
 
 
 def compare_file(
@@ -1539,7 +1858,13 @@ def compare_file(
     base_path: Path,
     all_res: bool = False,
     reference_pdb_path: Path = DEFAULT_REFERENCE_PDB,
-) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    dict[str, Any],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    MismatchDihedralData | None,
+]:
     conditioned_eval_path = conditioned_eval_path_for_assigned(assigned_path)
     metrics_path = conditioned_eval_json_path_for_assigned(assigned_path)
     metrics = load_metrics(metrics_path)
@@ -1595,6 +1920,13 @@ def compare_file(
         expected_local=expected_local,
         oracle_labels=oracle_labels,
         assigned_path=assigned_path,
+    )
+    mismatch_dihedral_data = load_mismatch_dihedral_data(
+        conditioned_eval_path=conditioned_eval_path,
+        target_pdb_path=target_pdb_path,
+        sample_name=sample_name,
+        expected_local=expected_local,
+        oracle_labels=oracle_labels,
     )
     row = {
         "source_type": source_type,
@@ -1671,15 +2003,36 @@ def compare_file(
             }
         )
 
+    accuracy_rows = [
+        {
+            "source_type": source_type,
+            "sample_name": sample_name,
+            "residue_index": residue_idx,
+            "vmd_resid": int(vmd_resids_by_index[residue_idx]),
+            "expected_local_label": int(expected_local[residue_idx]),
+            "oracle_label": int(oracle_labels[residue_idx]),
+            "cluster_count": int(cluster_counts[residue_idx]),
+        }
+        for residue_idx in range(expected_local.shape[0])
+    ]
+
     report_path = assigned_path.with_name(
         assigned_path.name.replace(ASSIGNED_TOKEN, "_conditioning_vs_oracle_report.txt", 1)
     )
     write_per_sample_report(report_path, row, selection_rows)
-    return row, residue_rows, selection_rows
+    return (
+        row,
+        residue_rows,
+        selection_rows,
+        accuracy_rows,
+        mismatch_dihedral_data,
+    )
 
 
 def main() -> None:
     args = parse_args()
+    if args.dihedral_error_bins <= 0:
+        raise ValueError("--dihedral-error-bins must be positive.")
     base_path = args.base_path.expanduser().resolve()
     out_dir = (args.out_dir or base_path).expanduser().resolve()
     reference_pdb_path = args.reference_pdb.expanduser().resolve()
@@ -1695,8 +2048,11 @@ def main() -> None:
     rows = []
     residue_rows = []
     selection_rows = []
+    accuracy_rows = []
+    mismatch_dihedral_data = []
+    missing_dihedral_samples = []
     for assigned_path in assigned_files:
-        row, per_residue, per_selection = compare_file(
+        row, per_residue, per_selection, per_accuracy, per_dihedrals = compare_file(
             assigned_path,
             base_path,
             all_res=args.all_res,
@@ -1705,6 +2061,11 @@ def main() -> None:
         rows.append(row)
         residue_rows.extend(per_residue)
         selection_rows.extend(per_selection)
+        accuracy_rows.extend(per_accuracy)
+        if per_dihedrals is None:
+            missing_dihedral_samples.append(row["sample_name"])
+        else:
+            mismatch_dihedral_data.append(per_dihedrals)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = args.output_prefix
@@ -1713,6 +2074,12 @@ def main() -> None:
     selection_csv = out_dir / f"{prefix}_per_selection.csv"
     report_path = out_dir / f"{prefix}_report.txt"
     plot_path = out_dir / f"{prefix}_errors.png"
+    residue_accuracy_plot_path = (
+        out_dir / f"{prefix}_per_residue_accuracy_matrices.png"
+    )
+    aggregate_dihedral_plot_path = (
+        out_dir / f"{prefix}_wrong_cluster_dihedral_error_histograms.png"
+    )
     # Keep the historical filename so existing workflows can find the artifact.
     rmsd_plot_path = out_dir / f"{prefix}_rmsd_histograms.png"
 
@@ -1736,6 +2103,12 @@ def main() -> None:
     write_summary_report(report_path, rows, summary, selection_rows)
     plot_summary(plot_path, selection_rows)
     plot_rmsd_violins(rmsd_plot_path, selection_rows)
+    plot_residue_accuracy_matrices(residue_accuracy_plot_path, accuracy_rows)
+    dihedral_plot_paths = write_mismatch_dihedral_plots(
+        mismatch_dihedral_data,
+        aggregate_dihedral_plot_path,
+        args.dihedral_error_bins,
+    )
 
     scope = "all residues" if args.all_res else VMD_SELECTION
     print(f"Processed {len(rows)} assigned cluster file(s) using: {scope}")
@@ -1745,6 +2118,17 @@ def main() -> None:
     print(f"Wrote report: {report_path}")
     print(f"Wrote error plot: {plot_path}")
     print(f"Wrote RMSD violin plot: {rmsd_plot_path}")
+    print(f"Wrote per-residue accuracy matrices: {residue_accuracy_plot_path}")
+    if dihedral_plot_paths:
+        print(
+            f"Wrote {len(dihedral_plot_paths) - 1} per-structure dihedral-error "
+            f"plot(s) and aggregate plot: {aggregate_dihedral_plot_path}"
+        )
+    if missing_dihedral_samples:
+        print(
+            "Skipped mismatch-dihedral plots for "
+            f"{len(missing_dihedral_samples)} sample(s) without dihedral arrays."
+        )
 
 
 if __name__ == "__main__":
