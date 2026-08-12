@@ -66,11 +66,8 @@ input_npz = args.input_npz
 output_npz = args.output_npz
 
 TEST_DATA = dict(np.load(input_npz))
-
-
-
 res_idx_and_glob_cluster_id = []
-for frame in TEST_DATA['labels']:
+for frame in TEST_DATA['residue_cluster_ids']:
     for_this_frame = []
     for res_idx, cluster_id in enumerate(frame):
         glob_cluster_id = res_idx_to_glob_cluster_ids[(res_idx, cluster_id)]
