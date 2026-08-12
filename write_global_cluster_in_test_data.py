@@ -1,11 +1,18 @@
-import argparse
+'''
+THIS IS USED TO WRITE THE TEST DATASET, GIVEN A TRAIN DATASET THAT DEFINES THE MAPPING TO GLOBAL CLUSTER IDS
+(hardcoded below in the script as path to the train dataset npz file)
+write_global_cluster_in_test_data.py \
+--input-npz input_test_data_npz_without_global_clusters.npz
+--output-npz test_data_with_global_clusters.npz
+'''
 
+import argparse
 import numpy as np
 
 # seq = 'SSVYITVELAIAVLAILGNVLVCWAVWLNSNLQNVTNYFVVSLAAADIAVGVLAIPFAITISTGFCAACHGCLFIACFVLVLTQSSIFSLLAIAIDRYIAIRIPLRYNGLVTGTRAKGIIAICWVLSFAIGLTPMLGWNNCGQPKEGKNHSQGCGEGQVACLFEDVVPMNYMVYFNFFACVLVPLLLMLGVYLRIFLAARRQLKQMESQPLPGERARSTLQKEVHAAKSLAIIVGLFALCWLPLHIINCFTFFCPDCSHAPLWLMYLAIVLSHTNSVVNPFIYAYRIREFRQTFRKIIRS'
 
 # step 1: load TRAIN data, must be train since onto it it is defined the global clusters mapping
-path = "/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/ANECAG_THEO_INZMA_INACTIVE_merged_with_globalclusters.npz"
+path = "/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/ANECAG_THEO_INZMA_INACTIVE_merged_with_globalclusters.npz" # reference used to define the mapping to global cluster ids
 data = dict(np.load(path))
 
 
