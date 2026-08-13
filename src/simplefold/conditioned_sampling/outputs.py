@@ -100,7 +100,7 @@ def write_dihedral_error_histogram_png(
         abs_ax.set_xlim(0.0, 180.0)
         signed_ax.set_ylabel("count")
         signed_ax.set_title(f"{label} signed error (n={int(row_valid.sum())})")
-        abs_ax.set_title(f"{label} absolute error")
+        abs_ax.set_title(f"{label} absolute error (n={int(row_valid.sum())})")
     error_axes[-1, 0].set_xlabel("signed error (deg)")
     error_axes[-1, 1].set_xlabel("absolute error (deg)")
     if figure_title is not None:

@@ -26,11 +26,11 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from simplefold.utils.dihedral_index_utils import remap_dihedral_atom_indices_after_atom_filter
 
 
-DEFAULT_INPUT = Path(
-    "/storage_common/angiod/phase-data/projects/a2a/systems/a2a/clusters/"
-    "cb3c3cae-5316-47db-8fbb-0567d5f0f75b/samples/"
-    "e98051c1-744f-4522-bafd-2bfdeea9788b/backmapping_dataset.npz"
-)
+# DEFAULT_INPUT = Path(
+#     "/storage_common/angiod/phase-data/projects/a2a/systems/a2a/clusters/"
+#     "cb3c3cae-5316-47db-8fbb-0567d5f0f75b/samples/"
+#     "e98051c1-744f-4522-bafd-2bfdeea9788b/backmapping_dataset.npz"
+# )
 
 # Canonical atom-axis mapping for known keys.
 KNOWN_ATOM_AXES = {
@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input-npz",
         type=Path,
-        default=DEFAULT_INPUT,
+        default=None,
         help="Path to input backmapping_dataset.npz.",
     )
     parser.add_argument(
@@ -131,6 +131,8 @@ def infer_default_output(input_npz: Path) -> Path:
 def main() -> None:
     args = parse_args()
     input_npz = args.input_npz.resolve()
+    if input_npz is None:
+        raise ValueError("Input NPZ must be specified with --input-npz.")
     output_npz = (
         args.output_npz.resolve()
         if args.output_npz is not None

@@ -50,52 +50,121 @@ EOF
     esac
 done
 
-# check for changes
-DEVICE="${DEVICE:-cuda:3}"
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/checkpoints/last.ckpt}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue/postswipe_theo_onlyN200}"
-
-# fixed
-N="${N:-200}"
+# -----
 BASE_SEED="${BASE_SEED:-123}"
 CONDA_ENV="${CONDA_ENV:-simplefold}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-# -----
-
-#! COMPARING AGAINST REFERENCE LABELS
-
 LABELS_NPZ_PATH="${LABELS_NPZ_PATH:-}" # none if comparing against reference
 echo "LABELS_NPZ_PATH=${LABELS_NPZ_PATH}"
+# -----
+#! ##################
+#! --- START HERE ---
+#! ##################
 
-#! aggregated data
+#! 1 -> (LEAVE AS IS) select Checkpoint path
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/checkpoints/last.ckpt}"
 
+#! 1.1 -> select device
+DEVICE="${DEVICE:-cuda:0}"
+
+#! 2 -> select OUTPUT_ROOT
+OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/official_tests}"
+
+#! 3 -> select TYPE / RAW_NPZ_PATH / N
+#* aggregated data
 # TYPE="all_structures"
 # RAW_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/ANECAG_THEO_INZMA_INACTIVE_merged_with_globalclusters.npz"
+# N="${N:-200}"
 
-#! splitted data
+#* splitted TRAIN data
 # TYPE='anecag'
 # RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/anecag_4000_noh_global_clusters.npz'
+# N="${N:-200}"
 
 # TYPE='inactive'
 # RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/inactive_4000_noh_global_clusters.npz'
+# N="${N:-200}"
 
 # TYPE='inzma'
 # RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/inzma_4000_noh_global_clusters.npz'
+# N="${N:-200}"
 
-TYPE='theo'
-RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/theo_4000_noh_global_clusters.npz'
+# TYPE='theo'
+# RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/theo_4000_noh_global_clusters.npz'
+# N="${N:-200}"
 
-# -----
+#*******
 
-# # # ! FOR DENOVO
+#* TEST data
+# TYPE='ANECAG_test'
+# RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/test_sets_v0/ANECAG/without_hs/backmapping_dataset.npz'
+# N="${N:-1000}"
+
+# TYPE='INACTIVE_test'
+# RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/test_sets_v0/INACTIVE/without_hs/backmapping_dataset.npz'
+# N="${N:--1}"
+
+# TYPE='INZMA_test'
+# RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/test_sets_v0/INZMA/without_hs/backmapping_dataset.npz'
+# N="${N:--1}"
+
+TYPE='THEO_test'
+RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/test_sets_v0/THEO/without_hs/backmapping_dataset.npz'
+N="${N:--1}"
+
+# TYPE='PAS_test'
+# RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/test_sets_v0/PAS/without_hs/backmapping_dataset.npz'
+# N="${N:--1}"
+
+#*******
+
+#* IF FOR DENOVO
+# RAW_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/ANECAG_THEO_INZMA_INACTIVE_merged_with_globalclusters.npz" # anything is ok
 # TYPE='denovo'
-# # # #* here we can use directly:
-# RAW_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/ANECAG_THEO_INZMA_INACTIVE_merged_with_globalclusters.npz"
-# # LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/sample.npz"
-# LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/single_test.npz"
+# LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/sample.npz" # this must have global clusters
+# LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/sample.npz" # this must have global clusters
+# N="${N:--1}" # should be not necessary
 
-# -----
+#! ###################
+#! ------- END -------
+#! ###################
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#! #################
+#! # ACTUAL  LOGIC #
+#! # DO NOT CHANGE #
+#! #################
 
 comparison_scope_args=()
 if [[ "${ALL_RES}" == true ]]; then
@@ -122,7 +191,7 @@ cmd=(
     --output-dir "${TYPE_OUTPUT_DIR}"
     --device "${DEVICE}"
     --guidance-scale 1.0
-    --tau 0.3
+    --tau 0.01
 )
 if [[ -n "${LABELS_NPZ_PATH}" ]]; then
     cmd+=(
@@ -147,6 +216,7 @@ python scripts/compare_conditioning_to_oracle.py \
     --out-dir "${TYPE_OUTPUT_DIR}" \
     "${comparison_scope_args[@]}"
 
+# this can be executed only for the last
 # echo "Comparing original conditioning vs oracle labels across all available structure types"
 # python scripts/compare_conditioning_to_oracle.py \
 #     --base-path "${OUTPUT_ROOT}" \

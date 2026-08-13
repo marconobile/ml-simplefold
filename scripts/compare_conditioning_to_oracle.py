@@ -28,6 +28,9 @@ if str(SRC_ROOT) not in sys.path:
 from simplefold.conditioned_sampling.outputs import (  # noqa: E402
     write_dihedral_error_histogram_png,
 )
+from simplefold.conditioned_sampling.dihedrals import (  # noqa: E402
+    symmetry_correct_dihedral_errors,
+)
 
 
 ASSIGNED_TOKEN = "_assigned_clusters.npz"
@@ -1476,6 +1479,69 @@ def values_by_selection(
     return values
 
 
+def mismatch_percentage_values(
+    selection_rows: list[dict[str, Any]],
+) -> dict[str, np.ndarray]:
+    return {
+        selection_name: 100.0 * values
+        for selection_name, values in values_by_selection(
+            selection_rows,
+            "mismatch_fraction",
+            ERROR_SELECTION_KEYS,
+        ).items()
+    }
+
+
+def finite_distribution_statistics(values: np.ndarray) -> dict[str, Any]:
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return {
+            "count": 0,
+            "mean": None,
+            "standard_deviation": None,
+        }
+    return {
+        "count": int(values.size),
+        "mean": float(np.mean(values)),
+        "standard_deviation": float(np.std(values, ddof=0)),
+    }
+
+
+def write_violin_statistics(
+    path: Path,
+    *,
+    plot_name: str,
+    value_name: str,
+    unit: str,
+    values_by_group: dict[str, np.ndarray],
+) -> None:
+    columns = [
+        "plot_name",
+        "selection_name",
+        "selection_title",
+        "value_name",
+        "unit",
+        "count",
+        "mean",
+        "standard_deviation",
+    ]
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        for selection_name, values in values_by_group.items():
+            writer.writerow(
+                {
+                    "plot_name": plot_name,
+                    "selection_name": selection_name,
+                    "selection_title": RMSD_SELECTION_PLOT_TITLES[selection_name],
+                    "value_name": value_name,
+                    "unit": unit,
+                    **finite_distribution_statistics(values),
+                }
+            )
+
+
 def set_selection_axis(
     ax: Any,
     positions: np.ndarray,
@@ -1508,14 +1574,8 @@ def set_violin_y_limits(
 
 
 def plot_summary(path: Path, selection_rows: list[dict[str, Any]]) -> None:
-    mismatch_percentages = {
-        selection_name: 100.0 * values
-        for selection_name, values in values_by_selection(
-            selection_rows,
-            "mismatch_fraction",
-            ERROR_SELECTION_KEYS,
-        ).items()
-    }
+    mismatch_percentages = mismatch_percentage_values(selection_rows)
+    sample_count = mismatch_percentages[ERROR_SELECTION_KEYS[0]].size
     violin_positions = np.arange(1, len(ERROR_SELECTION_KEYS) + 1)
     fig, ax = plt.subplots(figsize=(12.0, 6.0), constrained_layout=True)
 
@@ -1530,7 +1590,10 @@ def plot_summary(path: Path, selection_rows: list[dict[str, Any]]) -> None:
             int(position),
             RMSD_SELECTION_COLORS[selection_name],
         )
-    ax.set_title("Conditioning vs Oracle Mismatch Percentages Across Sampled Structures")
+    ax.set_title(
+        "Conditioning vs Oracle Mismatch Percentages Across Sampled Structures "
+        f"(n={sample_count})"
+    )
     ax.set_ylabel("Mismatching residues per structure (%)")
     set_violin_y_limits(ax, mismatch_percentages)
     set_selection_axis(ax, violin_positions, ERROR_SELECTION_KEYS)
@@ -1541,6 +1604,7 @@ def plot_summary(path: Path, selection_rows: list[dict[str, Any]]) -> None:
 
 def plot_rmsd_violins(path: Path, selection_rows: list[dict[str, Any]]) -> None:
     rmsd_values = values_by_selection(selection_rows, "pdb_rmsd_angstrom")
+    sample_count = rmsd_values[RMSD_SELECTION_KEYS[0]].size
     violin_positions = np.arange(1, len(RMSD_SELECTION_KEYS) + 1)
     fig, ax = plt.subplots(figsize=(12.0, 6.0), constrained_layout=True)
 
@@ -1555,7 +1619,9 @@ def plot_rmsd_violins(path: Path, selection_rows: list[dict[str, Any]]) -> None:
             int(position),
             RMSD_SELECTION_COLORS[selection_name],
         )
-    ax.set_title("Sampled PDB vs Target PDB RMSD Distributions")
+    ax.set_title(
+        f"Sampled PDB vs Target PDB RMSD Distributions (n={sample_count})"
+    )
     ax.set_ylabel("Selection-fitted RMSD (Å)")
     set_violin_y_limits(ax, rmsd_values)
     set_selection_axis(ax, violin_positions)
@@ -1573,6 +1639,12 @@ def plot_residue_confusion_matrices(
 ) -> None:
     if not confusion_rows:
         raise ValueError("Cannot plot residue confusion matrices without residue rows.")
+    sample_count = len(
+        {
+            (str(row["source_type"]), str(row["sample_name"]))
+            for row in confusion_rows
+        }
+    )
 
     rows_by_residue: dict[int, list[dict[str, Any]]] = {}
     for row in confusion_rows:
@@ -1645,7 +1717,10 @@ def plot_residue_confusion_matrices(
             vmin=0,
             vmax=color_max,
         )
-        ax.set_title(f"Residue {vmd_resid}", fontsize=8)
+        ax.set_title(
+            f"Residue {vmd_resid} (n={int(counts.sum())})",
+            fontsize=8,
+        )
         ticks = np.arange(cluster_count)
         ax.set_xticks(ticks)
         ax.set_yticks(ticks)
@@ -1672,7 +1747,7 @@ def plot_residue_confusion_matrices(
 
     fig.suptitle(
         "Per-Residue Conditioning vs Oracle Confusion Matrices\n"
-        f"{selection_title} · multi-cluster residues only",
+        f"{selection_title} · multi-cluster residues only · n={sample_count}",
         fontsize=14,
         y=0.96,
     )
@@ -1796,6 +1871,73 @@ def load_mismatch_dihedral_data(
     )
 
 
+def statistics_path_for_plot(plot_path: Path) -> Path:
+    return plot_path.with_name(f"{plot_path.stem}_statistics.csv")
+
+
+def write_dihedral_error_statistics(
+    path: Path,
+    *,
+    scope: str,
+    sample_name: str,
+    dihedral_diff_rad: np.ndarray,
+    dihedral_mask: np.ndarray,
+    dihedral_keys: tuple[str, ...],
+    residue_names: np.ndarray,
+    mismatch_count: int,
+    comparable_count: int,
+) -> None:
+    signed_error_deg, absolute_error_deg = symmetry_correct_dihedral_errors(
+        dihedral_diff_rad,
+        residue_names,
+        list(dihedral_keys),
+    )
+    valid = np.asarray(dihedral_mask, dtype=bool) & np.isfinite(dihedral_diff_rad)
+    columns = [
+        "scope",
+        "sample_name",
+        "mismatch_residue_count",
+        "comparable_residue_count",
+        "dihedral_key",
+        "error_type",
+        "unit",
+        "count",
+        "mean",
+        "standard_deviation",
+    ]
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        for key_index, dihedral_key in [
+            (None, "all"),
+            *enumerate(dihedral_keys),
+        ]:
+            if key_index is None:
+                key_valid = valid.reshape(-1)
+                signed_values = signed_error_deg.reshape(-1)[key_valid]
+                absolute_values = absolute_error_deg.reshape(-1)[key_valid]
+            else:
+                key_valid = valid[:, key_index]
+                signed_values = signed_error_deg[:, key_index][key_valid]
+                absolute_values = absolute_error_deg[:, key_index][key_valid]
+            for error_type, values in (
+                ("signed_error", signed_values),
+                ("absolute_error", absolute_values),
+            ):
+                writer.writerow(
+                    {
+                        "scope": scope,
+                        "sample_name": sample_name,
+                        "mismatch_residue_count": mismatch_count,
+                        "comparable_residue_count": comparable_count,
+                        "dihedral_key": dihedral_key,
+                        "error_type": error_type,
+                        "unit": "degrees",
+                        **finite_distribution_statistics(values),
+                    }
+                )
+
+
 def write_mismatch_dihedral_plots(
     data_by_sample: list[MismatchDihedralData],
     aggregate_path: Path,
@@ -1827,8 +1969,20 @@ def write_mismatch_dihedral_plots(
             error_bins=error_bins,
             figure_title=(
                 f"{data.sample_name}: dihedral errors at cluster mismatches "
-                f"({data.mismatch_count}/{data.comparable_count} residues)"
+                f"(n=1 structure; {data.mismatch_count}/"
+                f"{data.comparable_count} residues)"
             ),
+        )
+        write_dihedral_error_statistics(
+            statistics_path_for_plot(data.output_path),
+            scope="per_structure",
+            sample_name=data.sample_name,
+            dihedral_diff_rad=data.dihedral_diff_rad,
+            dihedral_mask=data.dihedral_mask,
+            dihedral_keys=data.dihedral_keys,
+            residue_names=data.residue_names,
+            mismatch_count=data.mismatch_count,
+            comparable_count=data.comparable_count,
         )
         written_paths.append(data.output_path)
 
@@ -1855,9 +2009,20 @@ def write_mismatch_dihedral_plots(
         error_bins=error_bins,
         figure_title=(
             "Dihedral errors at cluster mismatches across "
-            f"{len(data_by_sample)} generated structures "
-            f"({total_mismatches}/{total_comparable} residue events)"
+            f"generated structures (n={len(data_by_sample)}; "
+            f"{total_mismatches}/{total_comparable} residue events)"
         ),
+    )
+    write_dihedral_error_statistics(
+        statistics_path_for_plot(aggregate_path),
+        scope="aggregate",
+        sample_name="all_generated_structures",
+        dihedral_diff_rad=aggregate_diff,
+        dihedral_mask=aggregate_mask,
+        dihedral_keys=expected_keys,
+        residue_names=aggregate_residue_names,
+        mismatch_count=total_mismatches,
+        comparable_count=total_comparable,
     )
     written_paths.append(aggregate_path)
     return written_paths
@@ -2084,6 +2249,7 @@ def main() -> None:
     selection_csv = out_dir / f"{prefix}_per_selection.csv"
     report_path = out_dir / f"{prefix}_report.txt"
     plot_path = out_dir / f"{prefix}_errors.png"
+    error_statistics_path = statistics_path_for_plot(plot_path)
     residue_confusion_plot_path = (
         out_dir / f"{prefix}_per_residue_confusion_matrices.png"
     )
@@ -2095,6 +2261,7 @@ def main() -> None:
     )
     # Keep the historical filename so existing workflows can find the artifact.
     rmsd_plot_path = out_dir / f"{prefix}_rmsd_histograms.png"
+    rmsd_statistics_path = statistics_path_for_plot(rmsd_plot_path)
 
     rows = sorted(rows, key=lambda row: (row["source_type"], row["sample_name"]))
     residue_rows = sorted(
@@ -2115,7 +2282,24 @@ def main() -> None:
     write_selection_csv(selection_csv, selection_rows)
     write_summary_report(report_path, rows, summary, selection_rows)
     plot_summary(plot_path, selection_rows)
+    write_violin_statistics(
+        error_statistics_path,
+        plot_name="conditioning_vs_oracle_errors",
+        value_name="mismatching_residues_per_structure",
+        unit="percent",
+        values_by_group=mismatch_percentage_values(selection_rows),
+    )
     plot_rmsd_violins(rmsd_plot_path, selection_rows)
+    write_violin_statistics(
+        rmsd_statistics_path,
+        plot_name="conditioning_vs_oracle_rmsd",
+        value_name="selection_fitted_rmsd",
+        unit="angstrom",
+        values_by_group=values_by_selection(
+            selection_rows,
+            "pdb_rmsd_angstrom",
+        ),
+    )
     plot_residue_confusion_matrices(
         residue_confusion_plot_path,
         confusion_rows,
@@ -2140,7 +2324,9 @@ def main() -> None:
     print(f"Wrote per-selection CSV: {selection_csv}")
     print(f"Wrote report: {report_path}")
     print(f"Wrote error plot: {plot_path}")
+    print(f"Wrote error violin statistics: {error_statistics_path}")
     print(f"Wrote RMSD violin plot: {rmsd_plot_path}")
+    print(f"Wrote RMSD violin statistics: {rmsd_statistics_path}")
     print(f"Wrote all-residue confusion matrices: {residue_confusion_plot_path}")
     print(
         "Wrote strict-VMD-selection confusion matrices: "
@@ -2150,6 +2336,10 @@ def main() -> None:
         print(
             f"Wrote {len(dihedral_plot_paths) - 1} per-structure dihedral-error "
             f"plot(s) and aggregate plot: {aggregate_dihedral_plot_path}"
+        )
+        print(
+            "Wrote a mean/standard-deviation CSV beside every dihedral-error "
+            "plot."
         )
     if missing_dihedral_samples:
         print(

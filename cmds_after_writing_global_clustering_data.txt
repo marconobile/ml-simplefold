@@ -181,7 +181,7 @@ python scripts/compare_conditioning_to_oracle.py     --base-path /storage_common
 - to add global clusters in train input data:
     add_atom_idx_and_glob_cluster_id_per_frame_to_npz.py
 
-- to add global clusters in test input data:
-    write_global_cluster_in_test_data.py
+- to add global clusters in test input data: 
+    write_global_cluster_in_test_data.py # this also drops hs
 
 

@@ -1,0 +1,42 @@
+# START V0
+
+clusters for phase assignments: /storage_common/angiod/phase-data/projects/a2a/systems/a2a_small/clusters/6d4a7baa-c096-494e-b417-c8014437d37d/
+
+## TRAIN
+	- ANECAG (Full Active with agonist and G-protein)
+		/storage_common/angiod/phase-data/projects/a2a/systems/a2a_small/clusters/6d4a7baa-c096-494e-b417-c8014437d37d/samples/32788099-8f3f-4f7e-8363-e343c1ec720b/backmapping_dataset.npz
+	- THEO (Inactive with antagonist)
+		/storage_common/angiod/phase-data/projects/a2a/systems/a2a_small/clusters/6d4a7baa-c096-494e-b417-c8014437d37d/samples/474845ad-e1e5-4992-ab6b-b373b6968a72/backmapping_dataset.npz
+	- INZMA (Inactive with inverse agonist)
+		/storage_common/angiod/phase-data/projects/a2a/systems/a2a_small/clusters/6d4a7baa-c096-494e-b417-c8014437d37d/samples/f46aa447-cd2e-4fcd-ba58-d9f3df8bb4db/backmapping_dataset.npz
+	- INACTIVE (Inactive apo)
+		/storage_common/angiod/phase-data/projects/a2a/systems/a2a_small/clusters/6d4a7baa-c096-494e-b417-c8014437d37d/samples/ed1a15fb-babc-467f-a248-b2539f51c598/backmapping_dataset.npz
+
+not present in train: 
+	- pAs 1k (pAs apo)
+		/storage_common/angiod/phase-data/projects/a2a/systems/a2a_small/clusters/6d4a7baa-c096-494e-b417-c8014437d37d/samples/72895a96-b1fb-4b22-b868-1c9636aded47/backmapping_dataset.npz
+
+
+## TEST:
+	- TEST INACTIVE (1k frames): /storage_common/angiod/phase-data/projects/a2a/systems/a2a_small/clusters/6d4a7baa-c096-494e-b417-c8014437d37d/samples/1c21ba98-561c-4e98-bdd6-8758702f1a0a/backmapping_dataset.npz
+	- TEST THEO (1k frames): /storage_common/angiod/phase-data/projects/a2a/systems/a2a_small/clusters/6d4a7baa-c096-494e-b417-c8014437d37d/samples/36edf0ac-8fb9-404c-a796-1d5568a9e0a4/backmapping_dataset.npz
+	- TEST INZMA (1k frames): /storage_common/angiod/phase-data/projects/a2a/systems/a2a_small/clusters/6d4a7baa-c096-494e-b417-c8014437d37d/samples/b53f36da-cd91-419f-8080-5f29c3e8ad9f/backmapping_dataset.npz
+	- TEST ANECAG (10k frames): /storage_common/angiod/phase-data/projects/a2a/systems/a2a_small/clusters/6d4a7baa-c096-494e-b417-c8014437d37d/samples/ff64320f-29e6-4260-8bcc-883efe8a0a57/backmapping_dataset.npz
+	- TEST PAS (1k frames): /storage_common/angiod/phase-data/projects/a2a/systems/a2a_small/clusters/6d4a7baa-c096-494e-b417-c8014437d37d/samples/8591c4f8-7464-485d-8b2c-580d054a4029/backmapping_dataset.npz
+
+
+## Samples from Potts model 
+	- INeca: 
+
+# STOP V0
+
+
+
+
+
+
+
+
+
+NEW TRAIN DSETS v(1):
+/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/used_in_train_v1/files_to_be_used.txt

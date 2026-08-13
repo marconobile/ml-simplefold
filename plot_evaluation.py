@@ -941,7 +941,13 @@ def save_cluster_error_violin_plot(
             SOURCE_COLORS.get(source, "#7f7f7f"),
         )
 
-    ax.set_title(f"Assigned-cluster mismatch distribution — {title_suffix}")
+    sample_count = sum(
+        values.size for values in mismatch_fractions_by_source.values()
+    )
+    ax.set_title(
+        f"Assigned-cluster mismatch distribution — {title_suffix} "
+        f"(n={sample_count})"
+    )
     ax.set_xlabel("Sample type")
     ax.set_ylabel("Mismatching residue fraction")
     ax.set_xticks(x_positions)
