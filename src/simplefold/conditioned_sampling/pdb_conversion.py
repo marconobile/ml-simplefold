@@ -37,6 +37,7 @@ def resolve_conditioned_eval_converter_base_path(
 def run_conditioned_eval_cif_to_pdb_converter(
     base_path: Path,
     additional_cif_paths: Sequence[Path] = (),
+    chirality_log_path: Path | None = None,
 ) -> None:
     converter_path = REPO_ROOT / "scripts" / "convert_conditioned_eval_cifs_to_pdb.py"
     command = [
@@ -47,6 +48,8 @@ def run_conditioned_eval_cif_to_pdb_converter(
     ]
     for cif_path in additional_cif_paths:
         command.extend(("--additional-cif-path", str(cif_path)))
+    if chirality_log_path is not None:
+        command.extend(("--chirality-log-path", str(chirality_log_path)))
     print("Running CIF-to-PDB converter: " + " ".join(command))
     subprocess.run(command, check=True)
 
@@ -56,6 +59,7 @@ def ensure_conditioned_eval_sampled_pdb(
     output_dir: Path,
     current_file_only: bool = False,
     additional_required_cif_paths: Sequence[Path] = (),
+    chirality_log_path: Path | None = None,
 ) -> Path:
     sampled_pdb_path = conditioned_eval_sampled_pdb_path(sampled_cif_path)
     required_cif_paths = [sampled_cif_path, *additional_required_cif_paths]
@@ -73,6 +77,7 @@ def ensure_conditioned_eval_sampled_pdb(
         run_conditioned_eval_cif_to_pdb_converter(
             converter_base_path,
             additional_cif_paths=additional_required_cif_paths,
+            chirality_log_path=chirality_log_path,
         )
     except subprocess.CalledProcessError:
         if converter_base_path == sampled_cif_path:
@@ -85,6 +90,7 @@ def ensure_conditioned_eval_sampled_pdb(
         run_conditioned_eval_cif_to_pdb_converter(
             sampled_cif_path,
             additional_cif_paths=additional_required_cif_paths,
+            chirality_log_path=chirality_log_path,
         )
 
     missing_pdb_paths = [path for path in required_pdb_paths if not path.is_file()]
@@ -93,6 +99,7 @@ def ensure_conditioned_eval_sampled_pdb(
         run_conditioned_eval_cif_to_pdb_converter(
             missing_cif_paths[0],
             additional_cif_paths=missing_cif_paths[1:],
+            chirality_log_path=chirality_log_path,
         )
 
     missing_pdb_paths = [path for path in required_pdb_paths if not path.is_file()]

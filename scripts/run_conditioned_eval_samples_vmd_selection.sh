@@ -65,10 +65,10 @@ echo "LABELS_NPZ_PATH=${LABELS_NPZ_PATH}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/checkpoints/last.ckpt}"
 
 #! 1.1 -> select device
-DEVICE="${DEVICE:-cuda:0}"
+DEVICE="${DEVICE:-cuda:2}"
 
 #! 2 -> select OUTPUT_ROOT
-OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/official_tests}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/official_denovo_tests_V2N100}"
 
 #! 3 -> select TYPE / RAW_NPZ_PATH / N
 #* aggregated data
@@ -108,9 +108,9 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_
 # RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/test_sets_v0/INZMA/without_hs/backmapping_dataset.npz'
 # N="${N:--1}"
 
-TYPE='THEO_test'
-RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/test_sets_v0/THEO/without_hs/backmapping_dataset.npz'
-N="${N:--1}"
+# TYPE='THEO_test'
+# RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/test_sets_v0/THEO/without_hs/backmapping_dataset.npz'
+# N="${N:--1}"
 
 # TYPE='PAS_test'
 # RAW_NPZ_PATH='/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/test_sets_v0/PAS/without_hs/backmapping_dataset.npz'
@@ -119,11 +119,13 @@ N="${N:--1}"
 #*******
 
 #* IF FOR DENOVO
-# RAW_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/ANECAG_THEO_INZMA_INACTIVE_merged_with_globalclusters.npz" # anything is ok
-# TYPE='denovo'
+RAW_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/ANECAG_THEO_INZMA_INACTIVE_merged_with_globalclusters.npz" # anything is ok
+TYPE='denovo_INzma'
 # LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/sample.npz" # this must have global clusters
-# LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/sample.npz" # this must have global clusters
-# N="${N:--1}" # should be not necessary
+# INECA LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/test_sets_v0/INeca/without_hs/backmapping_dataset.npz" # this must have global clusters
+LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/sample_from_pots/INzma/without_hs/backmapping_dataset.npz"
+N="${N:-100}" # if -1 then comment -N in scripts/sample_with_conditioning.py
+
 
 #! ###################
 #! ------- END -------
@@ -176,9 +178,11 @@ cd "${REPO_ROOT}"
 
 TYPE_OUTPUT_DIR="${OUTPUT_ROOT}/${TYPE}_samples"
 mkdir -p "${TYPE_OUTPUT_DIR}"
+CHIRALITY_LOG_PATH="${OUTPUT_ROOT}/ensure_l_chirality.tsv"
 
 echo "Running TYPE=${TYPE} N=${N} BASE_SEED=${BASE_SEED}"
 echo "Output: ${TYPE_OUTPUT_DIR}"
+echo "Chirality log: ${CHIRALITY_LOG_PATH}"
 
 # LABELS_NPZ_PATH: optional. If set, Python samples N label rows.
 # Otherwise, Python samples N random observations from RAW_NPZ_PATH.
@@ -189,6 +193,7 @@ cmd=(
     --checkpoint-path "${CHECKPOINT_PATH}"
     --raw-npz-path "${RAW_NPZ_PATH}"
     --output-dir "${TYPE_OUTPUT_DIR}"
+    --chirality-log-path "${CHIRALITY_LOG_PATH}"
     --device "${DEVICE}"
     --guidance-scale 1.0
     --tau 0.01
@@ -201,7 +206,7 @@ fi
 "${cmd[@]}"
 
 echo "Assigning oracle clusters_conditioned_eval_target_reference.pdb for TYPE=${TYPE}"
-python scripts/assign_conditioned_eval_sample_clusters.py --base-path "${TYPE_OUTPUT_DIR}" #! assign with oracle 
+python scripts/assign_conditioned_eval_sample_clusters.py --base-path "${TYPE_OUTPUT_DIR}" #! assign with oracle
 
 if [[ -z "${LABELS_NPZ_PATH}" ]]; then
     echo "Plotting dihedral errors for residues with wrong oracle clusters for TYPE=${TYPE}"

@@ -34,8 +34,8 @@ with (root / "manifest.json").open() as f: record_id = json.load(f)[0]["id"]
 with np.load(root / "structures" / f"{record_id}.npz", allow_pickle=False) as data:
     atoms = data["atoms"]
     print(np.allclose(atoms["coords"], atoms["conformer"], rtol=0.0, atol=1e-6))
-PY    
-# must print False. If True, ref_pos is still leaking.    
+PY
+# must print False. If True, ref_pos is still leaking.
 
 
 
@@ -100,13 +100,13 @@ CUDA_VISIBLE_DEVICES=0 \
 model.scheduler.warmup_steps=500 \
 model.scheduler.min_lr=1e-6 \
 model.scheduler.max_lr=3e-4 \
-  
+
   # actual lr
 model.optimizer.lr=5e-4 \
 
 # final lr of the sheduler
 model.scheduler.eta_min=5e-7 \
-	
+
 
 
 sampling with cfg
@@ -131,7 +131,7 @@ tau = 0: deterministic sampling; no random noise is added.
 Smaller tau: less stochasticity and more reproducible/similar structures.
 Larger tau: more noise and potentially more diverse structures.
 Noise amplitude scales as \(\sqrt{\tau}\), so quadrupling tau doubles the injected noise amplitude.
-It does not directly control conditioning strength—that is --guidance-scale. tau controls sampler stochasticity while the cluster conditioning still guides the generated structure. The entry script delegates this argument to the conditioned workflow, which passes it into EMSampler ([workflow.py (line 264)](/home/nobilm@usi.ch/ml-simplefold/src/simplefold/conditioned_sampling/workflow.py:264)).  
+It does not directly control conditioning strength—that is --guidance-scale. tau controls sampler stochasticity while the cluster conditioning still guides the generated structure. The entry script delegates this argument to the conditioned workflow, which passes it into EMSampler ([workflow.py (line 264)](/home/nobilm@usi.ch/ml-simplefold/src/simplefold/conditioned_sampling/workflow.py:264)).
 
 
 ###########
@@ -140,6 +140,15 @@ bash scripts/resume_finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged.sh
 
 
 
+###
+- to add global clusters in train input data:
+    add_atom_idx_and_glob_cluster_id_per_frame_to_npz.py
+
+- to add global clusters in test input data:
+    write_global_cluster_in_test_data.py # this also drops hs
+
+python scripts/collect_conditioned_eval_rmsd.py \
+  /storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/official_denovo_with_reference_tests/PAS_test_samples
 
 
 
@@ -150,7 +159,28 @@ bash scripts/resume_finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged.sh
 
 
 
-#--- USE ONLY ABOVE FOR NOW ---#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+##################
+##################
+##################
+#--- USE ONLY ABOVE ---#
 then after finetuning for sampling either use:
 
 for a single structure:
@@ -176,12 +206,5 @@ python plot_evaluation.py --base_path /storage_common/nobilm/backmapping_pots_mo
 
 # to plot:
 python scripts/compare_conditioning_to_oracle.py     --base-path /storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue    --out-dir /storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue
-
-###
-- to add global clusters in train input data:
-    add_atom_idx_and_glob_cluster_id_per_frame_to_npz.py
-
-- to add global clusters in test input data: 
-    write_global_cluster_in_test_data.py # this also drops hs
 
 

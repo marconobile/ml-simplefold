@@ -262,6 +262,7 @@ def sample_conditioned_structure(
         additional_required_cif_paths=(
             (target_cif_path,) if target_cif_path is not None else ()
         ),
+        chirality_log_path=args.chirality_log_path,
     )
     if target_cif_path is not None:
         target_pdb_path = target_cif_path.with_suffix(".pdb")

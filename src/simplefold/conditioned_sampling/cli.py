@@ -113,6 +113,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--chirality-log-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional TSV path forwarded to the CIF-to-PDB converter. The file "
+            "records whether chirality correction was activated for each structure."
+        ),
+    )
+    parser.add_argument(
         "--frame-index",
         type=int,
         default=None,

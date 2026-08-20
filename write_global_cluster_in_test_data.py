@@ -20,7 +20,14 @@ args = parser.parse_args()
 input_npz = args.input_npz
 output_npz = args.output_npz
 
-subprocess.run(
+# load input npz to check if it has labels or residue_cluster_ids
+_inpt_data = dict(np.load(input_npz))
+run_drop_hs = True
+if 'labels' in _inpt_data:
+    run_drop_hs = False
+
+if run_drop_hs:
+    subprocess.run(
     [
         sys.executable,
         str(Path(__file__).resolve().with_name("drop_hs.py")),
@@ -28,10 +35,11 @@ subprocess.run(
         input_npz,
     ],
     check=True,
-)
-input_npz = str(
-    Path(input_npz).resolve().parent / "without_hs" / "backmapping_dataset.npz"
-)
+    )
+    input_npz = str(
+        Path(input_npz).resolve().parent / "without_hs" / "backmapping_dataset.npz"
+    )
+
 
 # seq = 'SSVYITVELAIAVLAILGNVLVCWAVWLNSNLQNVTNYFVVSLAAADIAVGVLAIPFAITISTGFCAACHGCLFIACFVLVLTQSSIFSLLAIAIDRYIAIRIPLRYNGLVTGTRAKGIIAICWVLSFAIGLTPMLGWNNCGQPKEGKNHSQGCGEGQVACLFEDVVPMNYMVYFNFFACVLVPLLLMLGVYLRIFLAARRQLKQMESQPLPGERARSTLQKEVHAAKSLAIIVGLFALCWLPLHIINCFTFFCPDCSHAPLWLMYLAIVLSHTNSVVNPFIYAYRIREFRQTFRKIIRS'
 
@@ -41,28 +49,28 @@ data = dict(np.load(path))
 
 # atom_resids and res_idx are supposed to be already fixed in train data when executing add_atom_idx_and_glob_cluster_id_per_frame_to_npz.py
 assert (
-    data['atom_resids'][0] == 0 and 
-    data['atom_resids'][-1] == 299 and 
+    data['atom_resids'][0] == 0 and
+    data['atom_resids'][-1] == 299 and
     data['atom_resids'].shape[0] == 2338
 )
 
 assert (
-    data['res_idx'][0] == 0 and 
-    data['res_idx'][-1] == 299 and 
+    data['res_idx'][0] == 0 and
+    data['res_idx'][-1] == 299 and
     data['res_idx'].shape[0]==300
 )
 
-atom_resids = data['atom_resids'] 
+atom_resids = data['atom_resids']
 res_idx = list(data['res_idx'])
 
 
 # step 2: build the mapping to global_id
 # create a list where each element is a tuple of (res_idx, residue_cluster_count) for that res_idx, since res_idx is constant across active/inactive/pas - since we are using only 1 protein -
 # then we can build the mapping to global_id by iterating through the list residue_cluster_count assigning/creating a global_id for each cluster in that range(residue_cluster_count)
-# so to do the mapping of clusters sampled the pots model we need to load up one of the active/inactive/pas npz files, get the res_idx and residue_cluster_counts, build the mapping to global_id, 
+# so to do the mapping of clusters sampled the pots model we need to load up one of the active/inactive/pas npz files, get the res_idx and residue_cluster_counts, build the mapping to global_id,
 # s.t. then we can use that mapping to convert the cluster ids sampled by the pots model to global cluster ids that we can then use for conditioning the folding model @ inference time
 
-l = list(zip(data['res_idx'], data['residue_cluster_counts'])) 
+l = list(zip(data['res_idx'], data['residue_cluster_counts']))
 
 # build the res_idx_to_glob_cluster_ids:
 res_idx_to_glob_cluster_ids = {}
@@ -84,9 +92,9 @@ for frame in data['residue_cluster_ids']:
     res_idx_and_glob_cluster_id.append(for_this_frame)
 
 data['res_idx_and_glob_cluster_id_per_frame'] = np.array(res_idx_and_glob_cluster_id) # (49996, 300)
-data['atom_idx_and_glob_cluster_id_per_frame'] = data['res_idx_and_glob_cluster_id_per_frame'][:, atom_resids] # (49996, 2338)    
+data['atom_idx_and_glob_cluster_id_per_frame'] = data['res_idx_and_glob_cluster_id_per_frame'][:, atom_resids] # (49996, 2338)
 
-# load test data 
+# load test data
 TEST_DATA = dict(np.load(input_npz))
 if 'labels' in TEST_DATA: res_key = 'labels'
 else: res_key = 'residue_cluster_ids'
@@ -102,7 +110,7 @@ for frame in TEST_DATA[res_key]:
 
 TEST_DATA["res_idx_and_glob_cluster_id_per_frame"] = np.array(
     res_idx_and_glob_cluster_id_test_data
-)    
+)
 
 TEST_DATA["atom_idx_and_glob_cluster_id_per_frame"] = TEST_DATA[
         "res_idx_and_glob_cluster_id_per_frame"
