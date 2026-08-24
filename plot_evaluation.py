@@ -1183,13 +1183,13 @@ def main() -> None:
             vmd_differences_by_category,
             category_schema,
             vmd_category_output_path,
-            "By Category — Strict VMD Selection",
+            "By Category — Residues in structured regions",
         )
         print(
             f"Saved all-residue categorized violin plot to: {category_output_path}"
         )
         print(
-            "Saved strict-VMD-selection categorized violin plot to: "
+            "Saved residues in structured regions categorized violin plot to: "
             f"{vmd_category_output_path}"
         )
     else:

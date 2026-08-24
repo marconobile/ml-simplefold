@@ -36,6 +36,14 @@ MISMATCH_METRICS = tuple(
 RMSD_METRICS = tuple(
     f"mean_rmsd_{selection}_angstrom" for selection in RMSD_SELECTIONS
 )
+PANEL_TITLE_FONTSIZE = 17.0
+AXIS_LABEL_FONTSIZE = 15.0
+TICK_LABEL_FONTSIZE = 15.0
+COMBINED_ANNOTATION_FONTSIZE = 14.0
+STANDALONE_ANNOTATION_FONTSIZE = 16.0
+COMBINED_RANKING_FONTSIZE = 16.0
+STANDALONE_RANKING_FONTSIZE = 18.0
+REPORT_TITLE_FONTSIZE = 20.0
 PLOT_SPECS = (
     (
         "overall_score",
@@ -45,7 +53,7 @@ PLOT_SPECS = (
     ),
     (
         "mean_mismatch_vmd_ca_residues_percent",
-        "Mean cluster mismatch: strict VMD (%)\nlower is better",
+        "Mean cluster mismatch: residues in structured regions (%)\nlower is better",
         "RdYlGn_r",
         "02_cluster_mismatch_strict_vmd.png",
     ),
@@ -57,31 +65,32 @@ PLOT_SPECS = (
     ),
     (
         "mean_rmsd_vmd_ca_residues_angstrom",
-        "Mean strict-VMD CA RMSD (Å)\nlower is better",
+        "Mean $\\mathrm{C}_{\\alpha}$ in structured regions RMSD (Å)\n"
+        "lower is better",
         "RdYlGn_r",
         "04_rmsd_strict_vmd_ca.png",
     ),
     (
         "mean_rmsd_ca_angstrom",
-        "Mean all-CA RMSD (Å)\nlower is better",
+        "Mean all $\\mathrm{C}_{\\alpha}$ RMSD (Å)\nlower is better",
         "RdYlGn_r",
         "05_rmsd_all_ca.png",
     ),
     (
         "mean_rmsd_backbone_angstrom",
-        "Mean backbone RMSD (Å)\nlower is better",
+        "Mean backbone heavy-atoms RMSD (Å)\nlower is better",
         "RdYlGn_r",
         "06_rmsd_backbone.png",
     ),
     (
         "mean_rmsd_protein_not_backbone_angstrom",
-        "Mean protein non-backbone RMSD (Å)\nlower is better",
+        "Mean side-chain heavy-atoms RMSD (Å)\nlower is better",
         "RdYlGn_r",
         "07_rmsd_protein_non_backbone.png",
     ),
     (
         "mean_rmsd_all_atoms_angstrom",
-        "Mean all-atom RMSD (Å)\nlower is better",
+        "Mean all heavy-atoms RMSD (Å)\nlower is better",
         "RdYlGn_r",
         "08_rmsd_all_atoms.png",
     ),
@@ -352,7 +361,7 @@ def draw_metric_heatmap(
     color_map_name: str,
     tau_values: list[float],
     guidance_values: list[float],
-    annotation_fontsize: float = 8.0,
+    annotation_fontsize: float = COMBINED_ANNOTATION_FONTSIZE,
 ) -> None:
     grid = metric_grid(
         summaries,
@@ -363,13 +372,19 @@ def draw_metric_heatmap(
     color_map = plt.get_cmap(color_map_name).copy()
     color_map.set_bad("#dddddd")
     image = axis.imshow(np.ma.masked_invalid(grid), cmap=color_map, aspect="auto")
-    axis.set_title(title)
-    axis.set_xlabel("Guidance scale")
-    axis.set_ylabel("Tau")
+    axis.set_title(title, fontsize=PANEL_TITLE_FONTSIZE)
+    axis.set_xlabel(r"$\text{Guidance scale } \gamma$", fontsize=AXIS_LABEL_FONTSIZE)
+    axis.set_ylabel(r"$\tau$", fontsize=AXIS_LABEL_FONTSIZE)
     axis.set_xticks(range(len(guidance_values)))
-    axis.set_xticklabels([display_number(value) for value in guidance_values])
+    axis.set_xticklabels(
+        [display_number(value) for value in guidance_values],
+        fontsize=TICK_LABEL_FONTSIZE,
+    )
     axis.set_yticks(range(len(tau_values)))
-    axis.set_yticklabels([display_number(value) for value in tau_values])
+    axis.set_yticklabels(
+        [display_number(value) for value in tau_values],
+        fontsize=TICK_LABEL_FONTSIZE,
+    )
 
     for row in range(grid.shape[0]):
         for column in range(grid.shape[1]):
@@ -402,7 +417,10 @@ def draw_metric_heatmap(
                     "alpha": 0.65,
                 },
             )
-    fig.colorbar(image, ax=axis, shrink=0.82)
+    colorbar = fig.colorbar(image, ax=axis, shrink=0.82)
+    colorbar.ax.tick_params(labelsize=TICK_LABEL_FONTSIZE)
+    colorbar.ax.xaxis.get_offset_text().set_fontsize(TICK_LABEL_FONTSIZE)
+    colorbar.ax.yaxis.get_offset_text().set_fontsize(TICK_LABEL_FONTSIZE)
 
 
 def ranking_panel_lines(summaries: list[dict[str, Any]]) -> list[str]:
@@ -437,7 +455,7 @@ def ranking_panel_lines(summaries: list[dict[str, Any]]) -> list[str]:
 def draw_ranking_panel(
     ranking_axis: Any,
     summaries: list[dict[str, Any]],
-    fontsize: float = 11.0,
+    fontsize: float = COMBINED_RANKING_FONTSIZE,
 ) -> None:
     ranking_axis.axis("off")
     ranking_axis.text(
@@ -457,7 +475,7 @@ def write_decision_report(path: Path, summaries: list[dict[str, Any]]) -> None:
     guidance_values = sorted(
         {float(summary["guidance_scale"]) for summary in summaries}
     )
-    fig, axes = plt.subplots(3, 3, figsize=(18, 15), constrained_layout=True)
+    fig, axes = plt.subplots(3, 3, figsize=(26, 21), constrained_layout=True)
     for axis, (metric, title, color_map_name, _) in zip(
         axes.flat[: len(PLOT_SPECS)],
         PLOT_SPECS,
@@ -481,7 +499,7 @@ def write_decision_report(path: Path, summaries: list[dict[str, Any]]) -> None:
     fig.suptitle(
         "Tau / guidance-scale sweep — conditioning fidelity and structural quality "
         f"(sample counts per cell: {count_text})",
-        fontsize=15,
+        fontsize=REPORT_TITLE_FONTSIZE,
     )
     fig.savefig(path, dpi=220)
     plt.close(fig)
@@ -509,7 +527,7 @@ def write_individual_report_panels(
             color_map_name,
             tau_values,
             guidance_values,
-            annotation_fontsize=10.0,
+            annotation_fontsize=STANDALONE_ANNOTATION_FONTSIZE,
         )
         fig.savefig(output_path, dpi=220)
         plt.close(fig)
@@ -517,7 +535,7 @@ def write_individual_report_panels(
 
     ranking_path = output_dir / "09_top_parameter_combinations.png"
     fig, axis = plt.subplots(figsize=(8.5, 6.5), constrained_layout=True)
-    draw_ranking_panel(axis, summaries, fontsize=13.0)
+    draw_ranking_panel(axis, summaries, fontsize=STANDALONE_RANKING_FONTSIZE)
     fig.savefig(ranking_path, dpi=220)
     plt.close(fig)
     output_paths.append(ranking_path)

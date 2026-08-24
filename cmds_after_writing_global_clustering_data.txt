@@ -205,6 +205,8 @@ python scripts/assign_conditioned_eval_sample_clusters.py --base-path /storage_c
 python plot_evaluation.py --base_path /storage_common/nobilm/backmapping_pots_model/results_sampling_unseen_structures/denovo_samples/sample_1 --out_dir /storage_common/nobilm/backmapping_pots_model/results_sampling_unseen_structures/denovo_samples/sample_1
 
 # to plot:
-python scripts/compare_conditioning_to_oracle.py     --base-path /storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue    --out-dir /storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/postcontinue
+python scripts/compare_conditioning_to_oracle.py \
+--base-path /storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/official_tests \
+--out-dir /storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/official_tests
 
 

@@ -96,15 +96,15 @@ RMSD_SELECTION_KEYS = tuple(key for key, _ in RMSD_SELECTIONS)
 ERROR_SELECTION_KEYS = ("vmd_ca_residues", "all_atoms")
 RMSD_SELECTION_DEFINITIONS = dict(RMSD_SELECTIONS)
 RMSD_SELECTION_PLOT_TITLES = {
-    "vmd_ca_residues": "Strict VMD CA/resid selection",
-    "ca": "All CA atoms",
-    "backbone": "Protein backbone (N, CA, C, O)",
-    "protein_not_backbone": "Protein and not backbone",
-    "all_atoms": "All atoms",
+    "vmd_ca_residues": r"$\mathrm{C}_{\alpha}$ structured regions residues",
+    "ca": r"$\mathrm{C}_{\alpha}$",
+    "backbone": "Backbone heavy-atoms",
+    "protein_not_backbone": "Side-chain heavy-atoms",
+    "all_atoms": "All-heavy-atoms",
 }
 ERROR_SELECTION_PLOT_TITLES = {
-    "vmd_ca_residues": "Strict VMD CA/resid selection",
-    "all_atoms": "All residues",
+    "vmd_ca_residues": "Structured regions",
+    "all_atoms": "All",
 }
 RMSD_SELECTION_COLORS = {
     "vmd_ca_residues": "#0072B2",
@@ -1819,10 +1819,10 @@ def plot_summary(path: Path, selection_rows: list[dict[str, Any]]) -> None:
             RMSD_SELECTION_COLORS[selection_name],
         )
     ax.set_title(
-        r"$\mathbf{\hat{g}} \text{ from backmapped structure vs ground truth } "
+        r"$\text{Mismatched clusters identities distributions } \mathbf{\hat{g}} \text{ from backmapped structure vs ground truth } "
         r"\mathbf{g*}$"
     )
-    ax.set_ylabel("Mismatching residues per structure (%)")
+    ax.set_ylabel("Mismatched clusters identities (%)")
     set_violin_y_limits(ax, mismatch_percentages)
     set_selection_axis(
         ax,
@@ -1855,7 +1855,7 @@ def plot_rmsd_violins(path: Path, selection_rows: list[dict[str, Any]]) -> None:
         r"$\text{RMSD distributions of backmapped structures } \hat{\mathbf{R}} "
         r"\text{ vs ground truth structures } \mathbf{R*}$"
     )
-    ax.set_ylabel("Selection-fitted RMSD (Å)")
+    ax.set_ylabel("RMSD (Å)")
     set_violin_y_limits(ax, rmsd_values)
     set_selection_axis(ax, violin_positions)
 

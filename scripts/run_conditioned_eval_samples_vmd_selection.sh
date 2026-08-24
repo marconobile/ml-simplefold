@@ -68,7 +68,7 @@ CHECKPOINT_PATH="${CHECKPOINT_PATH:-/storage_common/nobilm/ml-simplefold/fine_tu
 DEVICE="${DEVICE:-cuda:2}"
 
 #! 2 -> select OUTPUT_ROOT
-OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/official_denovo_tests_V2N100}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_clusters/finetune_simplefold100M_ANECAG_THEO_INZMA_INACTIVE_merged/TEST_DELETE_ME}"
 
 #! 3 -> select TYPE / RAW_NPZ_PATH / N
 #* aggregated data
@@ -120,7 +120,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/storage_common/nobilm/ml-simplefold/fine_tune_with_
 
 #* IF FOR DENOVO
 RAW_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/ANECAG_THEO_INZMA_INACTIVE_merged_with_globalclusters.npz" # anything is ok
-TYPE='denovo_INzma'
+TYPE='TEST_DELETE_ME'
 # LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/pots_samples/sample.npz" # this must have global clusters
 # INECA LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/test_sets_v0/INeca/without_hs/backmapping_dataset.npz" # this must have global clusters
 LABELS_NPZ_PATH="/storage_common/nobilm/backmapping_pots_model/datasets/ANECAG_THEO_INZMA_INACTIVE_merged/without_hs/split_per_simulation_type/sample_from_pots/INzma/without_hs/backmapping_dataset.npz"
